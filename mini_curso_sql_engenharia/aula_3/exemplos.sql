@@ -1,184 +1,236 @@
--- =============================================================
+-- ============================================
 -- AULA 3: Views, Procedures e Funções
--- Pré-requisito: execute banco.sql antes
--- =============================================================
+-- Arquivo: aula_3/exemplos.sql
+-- ⏱️  Tempo estimado: 25 minutos
+-- 📍 Posição no roteiro: Parte 3 de 5
+-- ============================================
+-- Objetivo: Organizar lógica de dados no próprio banco —
+--           reutilização, padronização e SQL como parte do ETL/ELT.
+-- Pré-requisito: execute banco.sql antes desta aula.
 
+USE loja_db;
+GO
 
--- -------------------------------------------------------------
--- 1. VIEWS
--- -------------------------------------------------------------
+-- ═══════════════════════════════════════════
+-- PARTE 1: VIEWS
+-- ═══════════════════════════════════════════
 
--- View simples: pedidos com nome do cliente e produto
-CREATE OR REPLACE VIEW vw_pedidos_detalhados AS
+-- ─────────────────────────────────────────
+-- BLOCO 1: O que é VIEW e quando usar
+-- O que vamos aprender: VIEW = SELECT salvo com nome, reutilizável como tabela
+-- ⏱️ ~7 minutos
+-- ─────────────────────────────────────────
+
+-- Sem VIEW: toda equipe escreve o mesmo JOIN de novo
+-- Isso gera inconsistência — cada pessoa filtra de um jeito diferente
+SELECT c.nome, p.id_pedido, p.valor_total, p.status
+FROM clientes AS c
+JOIN pedidos  AS p ON c.id_cliente = p.id_cliente;
+
+-- Com VIEW: a lógica fica centralizada no banco
+IF OBJECT_ID('vw_pedidos_clientes', 'V') IS NOT NULL DROP VIEW vw_pedidos_clientes;
+GO
+
+CREATE VIEW vw_pedidos_clientes AS
 SELECT
-    p.id          AS pedido_id,
-    c.nome        AS cliente,
-    c.estado,
-    pr.nome       AS produto,
-    pr.categoria,
-    p.quantidade,
-    p.total,
+    c.id_cliente,
+    c.nome          AS cliente,
+    c.cidade,
+    c.uf,
+    p.id_pedido,
+    p.data_pedido,
     p.status,
-    p.criado_em
-FROM pedidos p
-JOIN clientes c  ON c.id = p.cliente_id
-JOIN produtos pr ON pr.id = p.produto_id;
+    p.valor_total
+FROM clientes AS c
+JOIN pedidos  AS p ON c.id_cliente = p.id_cliente;
+GO
 
--- Usar a view como se fosse uma tabela
-SELECT * FROM vw_pedidos_detalhados;
+-- Consumir a view é como ler uma tabela
+SELECT * FROM vw_pedidos_clientes WHERE status = 'entregue';
+SELECT cliente, SUM(valor_total) AS total FROM vw_pedidos_clientes GROUP BY cliente;
 
--- Filtrar na view
-SELECT * FROM vw_pedidos_detalhados
-WHERE status = 'pago' AND estado = 'SP';
+-- View mais elaborada: resumo financeiro por cliente
+IF OBJECT_ID('vw_resumo_cliente', 'V') IS NOT NULL DROP VIEW vw_resumo_cliente;
+GO
 
-
--- View de resumo: faturamento por categoria
-CREATE OR REPLACE VIEW vw_faturamento_por_categoria AS
+CREATE VIEW vw_resumo_cliente AS
 SELECT
-    pr.categoria,
-    COUNT(p.id)   AS total_pedidos,
-    SUM(p.total)  AS faturamento
-FROM pedidos p
-JOIN produtos pr ON pr.id = p.produto_id
-WHERE p.status = 'pago'
-GROUP BY pr.categoria
-ORDER BY faturamento DESC;
+    c.id_cliente,
+    c.nome              AS cliente,
+    c.cidade,
+    COUNT(p.id_pedido)  AS total_pedidos,
+    SUM(CASE WHEN p.status = 'entregue' THEN p.valor_total ELSE 0 END) AS receita_confirmada,
+    SUM(CASE WHEN p.status = 'cancelado' THEN p.valor_total ELSE 0 END) AS receita_perdida,
+    MAX(p.data_pedido)  AS ultimo_pedido
+FROM clientes AS c
+LEFT JOIN pedidos AS p ON c.id_cliente = p.id_cliente
+GROUP BY c.id_cliente, c.nome, c.cidade;
+GO
 
-SELECT * FROM vw_faturamento_por_categoria;
+SELECT * FROM vw_resumo_cliente ORDER BY receita_confirmada DESC;
 
-
--- Remover uma view
--- DROP VIEW IF EXISTS vw_pedidos_detalhados;
-
-
--- -------------------------------------------------------------
--- 2. VIEW MATERIALIZADA (PostgreSQL)
--- -------------------------------------------------------------
-
--- Cria e salva os dados fisicamente
-DROP MATERIALIZED VIEW IF EXISTS mv_clientes_por_estado;
-
-CREATE MATERIALIZED VIEW mv_clientes_por_estado AS
-SELECT
-    estado,
-    COUNT(*)      AS total_clientes,
-    MAX(criado_em) AS ultimo_cadastro
-FROM clientes
-GROUP BY estado
-ORDER BY total_clientes DESC;
-
--- Consultar
-SELECT * FROM mv_clientes_por_estado;
-
--- Atualizar os dados (rodar após novos inserts)
-REFRESH MATERIALIZED VIEW mv_clientes_por_estado;
+-- 💡 O que acontece se mudar?
+-- A VIEW não armazena dados — ela executa o SELECT toda vez que é consultada
+-- Crie uma VIEW de produtos por categoria e tente filtrá-la como se fosse tabela
 
 
--- -------------------------------------------------------------
--- 3. STORED PROCEDURES
--- -------------------------------------------------------------
+-- ═══════════════════════════════════════════
+-- PARTE 2: STORED PROCEDURES
+-- ═══════════════════════════════════════════
 
--- Procedure: cancela um pedido pelo ID
-CREATE OR REPLACE PROCEDURE sp_cancelar_pedido(p_id INT)
-LANGUAGE plpgsql AS $$
+-- ─────────────────────────────────────────
+-- BLOCO 2: Stored Procedures — lógica de processo no banco
+-- O que vamos aprender: procedures encapsulam lógica e recebem parâmetros
+-- ⏱️ ~8 minutos
+-- ─────────────────────────────────────────
+
+-- Procedure simples: relatório de pedidos por período
+IF OBJECT_ID('sp_pedidos_periodo', 'P') IS NOT NULL DROP PROCEDURE sp_pedidos_periodo;
+GO
+
+CREATE PROCEDURE sp_pedidos_periodo
+    @data_inicio DATE,
+    @data_fim    DATE
+AS
 BEGIN
-    -- Verifica se o pedido existe
-    IF NOT EXISTS (SELECT 1 FROM pedidos WHERE id = p_id) THEN
-        RAISE EXCEPTION 'Pedido % não encontrado.', p_id;
-    END IF;
-
-    -- Atualiza o status
-    UPDATE pedidos SET status = 'cancelado' WHERE id = p_id;
-
-    RAISE NOTICE 'Pedido % cancelado com sucesso.', p_id;
+    SELECT
+        p.id_pedido,
+        c.nome        AS cliente,
+        p.data_pedido,
+        p.status,
+        p.valor_total
+    FROM pedidos  AS p
+    JOIN clientes AS c ON p.id_cliente = c.id_cliente
+    WHERE p.data_pedido BETWEEN @data_inicio AND @data_fim
+    ORDER BY p.data_pedido;
 END;
-$$;
+GO
 
--- Executar
-CALL sp_cancelar_pedido(2);
+-- Executar a procedure
+EXEC sp_pedidos_periodo '2024-01-01', '2024-03-31';
+EXEC sp_pedidos_periodo '2024-04-01', '2024-06-30';
 
--- Verificar
-SELECT id, status FROM pedidos WHERE id = 2;
+-- Procedure de processo: atualiza status de pedidos antigos pendentes
+IF OBJECT_ID('sp_cancelar_pendentes', 'P') IS NOT NULL DROP PROCEDURE sp_cancelar_pendentes;
+GO
 
--- Restaurar para o exemplo não ficar sujo
-UPDATE pedidos SET status = 'pago' WHERE id = 2;
-
-
--- Procedure: atualiza estoque após pedido pago
-CREATE OR REPLACE PROCEDURE sp_baixar_estoque(p_produto_id INT, p_quantidade INT)
-LANGUAGE plpgsql AS $$
-DECLARE
-    v_estoque INT;
+CREATE PROCEDURE sp_cancelar_pendentes
+    @dias_limite INT = 30   -- parâmetro com valor padrão
+AS
 BEGIN
-    SELECT estoque INTO v_estoque FROM produtos WHERE id = p_produto_id;
+    DECLARE @cancelados INT;
 
-    IF v_estoque < p_quantidade THEN
-        RAISE EXCEPTION 'Estoque insuficiente. Disponível: %, Solicitado: %', v_estoque, p_quantidade;
-    END IF;
+    -- Cancela pedidos pendentes mais antigos que X dias
+    UPDATE pedidos
+    SET status = 'cancelado'
+    WHERE status = 'pendente'
+      AND DATEDIFF(DAY, data_pedido, GETDATE()) > @dias_limite;
 
-    UPDATE produtos
-    SET estoque = estoque - p_quantidade
-    WHERE id = p_produto_id;
+    SET @cancelados = @@ROWCOUNT;
 
-    RAISE NOTICE 'Estoque atualizado. Novo estoque: %', v_estoque - p_quantidade;
+    -- Retorna resumo do que foi feito
+    SELECT @cancelados AS pedidos_cancelados,
+           GETDATE()   AS executado_em;
 END;
-$$;
+GO
 
--- Testar
-CALL sp_baixar_estoque(2, 5);  -- produto 2, baixa 5 unidades
+-- Uso real em ETL: a procedure vira um step do pipeline
+-- EXEC sp_cancelar_pendentes 30;   -- usa o padrão de 30 dias
+-- EXEC sp_cancelar_pendentes 7;    -- versão mais agressiva: 7 dias
 
--- Ver resultado
-SELECT id, nome, estoque FROM produtos WHERE id = 2;
+-- 💡 O que acontece se mudar?
+-- Adicione um parâmetro @status_destino para flexibilizar o destino (não só 'cancelado')
+-- Inclua TRY/CATCH para tratamento de erro em produção
 
 
--- -------------------------------------------------------------
--- 4. FUNÇÕES
--- -------------------------------------------------------------
+-- ═══════════════════════════════════════════
+-- PARTE 3: FUNÇÕES
+-- ═══════════════════════════════════════════
 
--- Função: calcula preço com desconto
-CREATE OR REPLACE FUNCTION fn_aplicar_desconto(preco NUMERIC, percentual NUMERIC)
-RETURNS NUMERIC AS $$
+-- ─────────────────────────────────────────
+-- BLOCO 3: Funções escalares — retornam um valor
+-- O que vamos aprender: encapsular cálculos reutilizáveis
+-- ⏱️ ~5 minutos
+-- ─────────────────────────────────────────
+
+-- Função escalar: calcula o valor com desconto
+IF OBJECT_ID('fn_valor_com_desconto', 'FN') IS NOT NULL DROP FUNCTION fn_valor_com_desconto;
+GO
+
+CREATE FUNCTION fn_valor_com_desconto
+(
+    @valor          DECIMAL(10,2),
+    @pct_desconto   DECIMAL(5,2)
+)
+RETURNS DECIMAL(10,2)
+AS
 BEGIN
-    RETURN ROUND(preco - (preco * percentual / 100), 2);
+    RETURN @valor - (@valor * @pct_desconto / 100);
 END;
-$$ LANGUAGE plpgsql;
+GO
 
--- Usar no SELECT
+-- Usando a função em um SELECT
 SELECT
     nome,
-    preco                             AS preco_original,
-    fn_aplicar_desconto(preco, 10)    AS preco_10pct_desconto,
-    fn_aplicar_desconto(preco, 15)    AS preco_15pct_desconto
-FROM produtos;
+    preco                                       AS preco_original,
+    dbo.fn_valor_com_desconto(preco, 10)        AS preco_10pct_off,
+    dbo.fn_valor_com_desconto(preco, 15)        AS preco_15pct_off
+FROM produtos
+WHERE preco > 100;
+
+-- 💡 O que acontece se mudar?
+-- Crie uma função que classifica o cliente como 'VIP', 'Regular' ou 'Novo'
+-- baseado no número de pedidos (VIP > 3, Regular >= 1, Novo = 0)
 
 
--- Função: classifica pedido por valor
-CREATE OR REPLACE FUNCTION fn_classificar_pedido(valor NUMERIC)
-RETURNS VARCHAR AS $$
-BEGIN
-    IF    valor < 100    THEN RETURN 'Baixo';
-    ELSIF valor < 1000   THEN RETURN 'Médio';
-    ELSE                      RETURN 'Alto';
-    END IF;
-END;
-$$ LANGUAGE plpgsql;
+-- ─────────────────────────────────────────
+-- BLOCO 4: Funções de tabela — retornam um conjunto de linhas
+-- O que vamos aprender: função que age como VIEW parametrizada
+-- ⏱️ ~5 minutos
+-- ─────────────────────────────────────────
 
--- Usar no SELECT
+-- Função de tabela: retorna itens de um pedido com detalhes
+IF OBJECT_ID('fn_itens_pedido', 'TF') IS NOT NULL DROP FUNCTION fn_itens_pedido;
+GO
+
+CREATE FUNCTION fn_itens_pedido (@id_pedido INT)
+RETURNS TABLE
+AS
+RETURN
+(
+    SELECT
+        pr.nome                          AS produto,
+        cat.nome                         AS categoria,
+        i.quantidade,
+        i.preco_unitario,
+        i.quantidade * i.preco_unitario  AS subtotal
+    FROM itens_pedido AS i
+    JOIN produtos     AS pr  ON i.id_produto    = pr.id_produto
+    JOIN categorias   AS cat ON pr.id_categoria = cat.id_categoria
+    WHERE i.id_pedido = @id_pedido
+);
+GO
+
+-- Usar como se fosse uma tabela, passando o parâmetro
+SELECT * FROM dbo.fn_itens_pedido(8);
+
+-- Combinar com outras tabelas
 SELECT
-    id,
-    total,
-    fn_classificar_pedido(total) AS classificacao
-FROM pedidos
-ORDER BY total;
+    p.id_pedido,
+    c.nome          AS cliente,
+    p.data_pedido,
+    itens.*
+FROM pedidos  AS p
+JOIN clientes AS c ON p.id_cliente = c.id_cliente
+CROSS APPLY dbo.fn_itens_pedido(p.id_pedido) AS itens
+WHERE p.id_pedido IN (1, 7, 8);
 
+-- 💡 O que acontece se mudar?
+-- CROSS APPLY é como um JOIN com função — só retorna linhas onde a função retorna resultado
+-- Troque por OUTER APPLY para manter pedidos mesmo que a função retorne vazio
 
--- -------------------------------------------------------------
--- 5. Limpeza
--- -------------------------------------------------------------
-DROP VIEW IF EXISTS vw_pedidos_detalhados;
-DROP VIEW IF EXISTS vw_faturamento_por_categoria;
-DROP MATERIALIZED VIEW IF EXISTS mv_clientes_por_estado;
-DROP PROCEDURE IF EXISTS sp_cancelar_pedido(INT);
-DROP PROCEDURE IF EXISTS sp_baixar_estoque(INT, INT);
-DROP FUNCTION IF EXISTS fn_aplicar_desconto(NUMERIC, NUMERIC);
-DROP FUNCTION IF EXISTS fn_classificar_pedido(NUMERIC);
+-- VIEW vs PROCEDURE vs FUNÇÃO — quando usar cada um?
+-- VIEW        → consulta padronizada, sem parâmetro, consumida como tabela
+-- PROCEDURE   → processo/ação com lógica, pode fazer INSERT/UPDATE/DELETE
+-- FUNÇÃO      → cálculo reutilizável, pode ser usada dentro de um SELECT
+GO

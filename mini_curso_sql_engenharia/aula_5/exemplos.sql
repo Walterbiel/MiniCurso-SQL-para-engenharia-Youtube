@@ -1,213 +1,308 @@
--- =============================================================
--- AULA 5: Data Warehouse — Fato, Dimensão, Star Schema, ETL/ELT
--- Pré-requisito: execute banco.sql antes
--- =============================================================
--- Nesta aula, vamos transformar nosso banco transacional (OLTP)
--- em um modelo dimensional simples (DW / Star Schema)
--- =============================================================
+-- ============================================
+-- AULA 5: SQL no Data Warehouse
+-- Arquivo: aula_5/exemplos.sql
+-- ⏱️  Tempo estimado: 30 minutos
+-- 📍 Posição no roteiro: Parte 5 de 5
+-- ============================================
+-- Objetivo: Conectar SQL ao mundo real de engenharia de dados —
+--           modelagem dimensional, cargas incrementais e SCDs.
+-- Pré-requisito: execute banco.sql antes desta aula.
+--   Esta aula usa dois bancos: loja_db (OLTP) e dw_loja (DW)
 
+-- ─────────────────────────────────────────
+-- BLOCO 1: OLTP vs OLAP — dois mundos diferentes
+-- O que vamos aprender: OLTP para operação, OLAP para análise
+-- ⏱️ ~5 minutos
+-- ─────────────────────────────────────────
 
--- -------------------------------------------------------------
--- 1. CRIAR AS DIMENSÕES
--- -------------------------------------------------------------
+-- OLTP (Online Transaction Processing) — banco operacional
+-- → Muitas transações pequenas e rápidas
+-- → Normalizado: evita redundância
+-- → Exemplo: loja_db — cada venda atualiza pedidos + itens_pedido
 
--- dim_clientes: contexto sobre quem comprou
-DROP TABLE IF EXISTS dim_clientes;
+USE loja_db;
+GO
 
-CREATE TABLE dim_clientes AS
+-- Para responder "quanto vendemos por categoria em janeiro?"
+-- no OLTP precisamos de 4 JOINs pesados:
 SELECT
-    id          AS id_cliente,
-    nome,
-    cidade,
-    estado,
-    criado_em   AS data_cadastro
-FROM clientes;
+    cat.nome                                       AS categoria,
+    SUM(i.quantidade * i.preco_unitario)           AS receita_janeiro
+FROM itens_pedido AS i
+JOIN pedidos      AS p   ON i.id_pedido    = p.id_pedido
+JOIN produtos     AS pr  ON i.id_produto   = pr.id_produto
+JOIN categorias   AS cat ON pr.id_categoria = cat.id_categoria
+WHERE p.data_pedido BETWEEN '2024-01-01' AND '2024-01-31'
+  AND p.status = 'entregue'
+GROUP BY cat.nome;
 
-ALTER TABLE dim_clientes ADD PRIMARY KEY (id_cliente);
+-- OLAP (Online Analytical Processing) — banco analítico / DW
+-- → Poucas queries grandes sobre muitos dados
+-- → Desnormalizado: redundância proposital para performance
+-- → Modelo dimensional: fato + dimensões
+
+-- 💡 O que acontece se mudar?
+-- No DW essa mesma query fica simples (sem JOINs complexos)
+-- Vamos construir o DW agora e você vai ver a diferença ao final
 
 
--- dim_produtos: contexto sobre o que foi vendido
-DROP TABLE IF EXISTS dim_produtos;
+-- ─────────────────────────────────────────
+-- BLOCO 2: Tabelas fato, dimensão e chaves substitutas
+-- O que vamos aprender: star schema — o modelo padrão de DW
+-- ⏱️ ~5 minutos
+-- ─────────────────────────────────────────
 
-CREATE TABLE dim_produtos AS
+USE dw_loja;
+GO
+
+-- Dimensão = quem, o quê, quando, onde (contexto)
+-- Fato = o que aconteceu em números (métricas)
+
+-- Surrogate Key (chave substituta):
+-- → Gerada pelo DW (IDENTITY), independente do sistema de origem
+-- → Permite SCD Tipo 2 (múltiplas versões do mesmo cliente)
+-- → Protege o DW de mudanças na chave de origem
+
+-- Estrutura do star schema:
+--
+--   dim_cliente ──┐
+--   dim_produto ──┼──> fato_vendas
+--   dim_tempo ────┘
+
+-- Ver a estrutura das dimensões
+SELECT COLUMN_NAME, DATA_TYPE
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_NAME = 'dim_cliente';
+
+SELECT COLUMN_NAME, DATA_TYPE
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_NAME = 'fato_vendas';
+
+-- 💡 O que acontece se mudar?
+-- dim_tempo é pré-carregada (todos os dias do ano) — não depende de venda
+-- fato_vendas é append-only: nunca fazemos UPDATE, apenas INSERT
+
+
+-- ─────────────────────────────────────────
+-- BLOCO 3: Carga incremental — staging → DW
+-- O que vamos aprender: extrair do OLTP, carregar na staging, depois nas dimensões
+-- ⏱️ ~5 minutos
+-- ─────────────────────────────────────────
+
+-- Passo 1: Extrai do OLTP para a staging (simula o trabalho do pipeline)
+TRUNCATE TABLE stg_pedidos;  -- limpa staging antes de recarregar
+
+INSERT INTO stg_pedidos (id_pedido, id_cliente, nome_cliente, cidade, uf,
+                          id_produto, nome_produto, categoria, preco_produto,
+                          data_pedido, quantidade, valor)
 SELECT
-    id        AS id_produto,
-    nome,
-    categoria,
-    preco
-FROM produtos;
+    p.id_pedido,
+    c.id_cliente,
+    c.nome,
+    c.cidade,
+    c.uf,
+    pr.id_produto,
+    pr.nome,
+    cat.nome,
+    pr.preco,
+    p.data_pedido,
+    i.quantidade,
+    i.quantidade * i.preco_unitario
+FROM loja_db.dbo.itens_pedido AS i
+JOIN loja_db.dbo.pedidos      AS p   ON i.id_pedido    = p.id_pedido
+JOIN loja_db.dbo.clientes     AS c   ON p.id_cliente   = c.id_cliente
+JOIN loja_db.dbo.produtos     AS pr  ON i.id_produto   = pr.id_produto
+JOIN loja_db.dbo.categorias   AS cat ON pr.id_categoria = cat.id_categoria
+WHERE p.status = 'entregue';
 
-ALTER TABLE dim_produtos ADD PRIMARY KEY (id_produto);
+SELECT COUNT(*) AS linhas_na_staging FROM stg_pedidos;
 
-
--- dim_data: dimensão de tempo (fundamental em todo DW)
--- Em produção esta tabela tem milhares de linhas (um por dia)
-DROP TABLE IF EXISTS dim_data;
-
-CREATE TABLE dim_data AS
+-- Passo 2: Carrega dim_cliente (carga inicial — apenas clientes novos)
+INSERT INTO dim_cliente (id_cliente_origem, nome, cidade, uf, data_inicio, ativo)
 SELECT DISTINCT
-    criado_em                                         AS data_completa,
-    EXTRACT(YEAR  FROM criado_em)::INT                AS ano,
-    EXTRACT(MONTH FROM criado_em)::INT                AS mes,
-    EXTRACT(DAY   FROM criado_em)::INT                AS dia,
-    TO_CHAR(criado_em, 'Month')                       AS nome_mes,
-    EXTRACT(QUARTER FROM criado_em)::INT              AS trimestre,
-    CASE EXTRACT(DOW FROM criado_em)::INT
-        WHEN 0 THEN 'Domingo'
-        WHEN 1 THEN 'Segunda'
-        WHEN 2 THEN 'Terça'
-        WHEN 3 THEN 'Quarta'
-        WHEN 4 THEN 'Quinta'
-        WHEN 5 THEN 'Sexta'
-        WHEN 6 THEN 'Sábado'
-    END AS dia_semana
-FROM pedidos;
+    s.id_cliente,
+    s.nome_cliente,
+    s.cidade,
+    s.uf,
+    CAST(GETDATE() AS DATE),
+    1
+FROM stg_pedidos AS s
+WHERE NOT EXISTS (
+    SELECT 1 FROM dim_cliente AS d
+    WHERE d.id_cliente_origem = s.id_cliente
+      AND d.ativo = 1
+);
 
-ALTER TABLE dim_data ADD PRIMARY KEY (data_completa);
+-- Passo 3: Carrega dim_produto
+INSERT INTO dim_produto (id_produto_origem, nome, categoria, preco, data_inicio, ativo)
+SELECT DISTINCT
+    s.id_produto,
+    s.nome_produto,
+    s.categoria,
+    s.preco_produto,
+    CAST(GETDATE() AS DATE),
+    1
+FROM stg_pedidos AS s
+WHERE NOT EXISTS (
+    SELECT 1 FROM dim_produto AS d
+    WHERE d.id_produto_origem = s.id_produto
+      AND d.ativo = 1
+);
 
--- Ver a dimensão de data
-SELECT * FROM dim_data ORDER BY data_completa;
+SELECT COUNT(*) AS clientes_na_dimensao FROM dim_cliente;
+SELECT COUNT(*) AS produtos_na_dimensao FROM dim_produto;
+
+-- 💡 O que acontece se mudar?
+-- Execute o INSERT nas dimensões duas vezes — o WHERE NOT EXISTS evita duplicatas
+-- Esse padrão é a base de qualquer carga incremental
 
 
--- -------------------------------------------------------------
--- 2. CRIAR A TABELA FATO
--- -------------------------------------------------------------
+-- ─────────────────────────────────────────
+-- BLOCO 4: Carregando a fato_vendas
+-- O que vamos aprender: fato referencia as surrogate keys das dimensões
+-- ⏱️ ~4 minutos
+-- ─────────────────────────────────────────
 
--- fato_pedidos: os eventos de venda com métricas
-DROP TABLE IF EXISTS fato_pedidos;
-
-CREATE TABLE fato_pedidos AS
+-- A fato não guarda nomes — guarda só as surrogate keys (sk_)
+-- e as métricas (quantidade, valor)
+INSERT INTO fato_vendas (sk_cliente, sk_produto, sk_tempo, id_pedido_origem, quantidade, valor)
 SELECT
-    p.id           AS id_pedido,
-    p.cliente_id   AS id_cliente,
-    p.produto_id   AS id_produto,
-    p.criado_em    AS data_pedido,   -- FK para dim_data
-    p.quantidade,
-    p.total,
-    p.status
-FROM pedidos p;
+    dc.sk_cliente,
+    dp.sk_produto,
+    dt.sk_tempo,
+    s.id_pedido,
+    s.quantidade,
+    s.valor
+FROM stg_pedidos AS s
+JOIN dim_cliente AS dc ON s.id_cliente = dc.id_cliente_origem AND dc.ativo = 1
+JOIN dim_produto AS dp ON s.id_produto = dp.id_produto_origem AND dp.ativo = 1
+JOIN dim_tempo   AS dt ON CAST(FORMAT(s.data_pedido, 'yyyyMMdd') AS INT) = dt.sk_tempo
+WHERE NOT EXISTS (
+    SELECT 1 FROM fato_vendas AS f
+    WHERE f.id_pedido_origem = s.id_pedido
+      AND f.sk_produto       = dp.sk_produto
+);
 
-ALTER TABLE fato_pedidos ADD PRIMARY KEY (id_pedido);
+SELECT COUNT(*) AS linhas_na_fato FROM fato_vendas;
 
--- Ver a fato
-SELECT * FROM fato_pedidos ORDER BY data_pedido;
-
-
--- -------------------------------------------------------------
--- 3. QUERIES ANALÍTICAS NO STAR SCHEMA
--- (é aqui que o DW brilha)
--- -------------------------------------------------------------
-
--- Faturamento total por mês e ano
+-- Consulta analítica no DW — muito mais simples que no OLTP!
 SELECT
-    d.ano,
-    d.mes,
-    d.nome_mes,
-    SUM(f.total)    AS faturamento,
-    COUNT(f.id_pedido) AS total_pedidos
-FROM fato_pedidos f
-JOIN dim_data d ON d.data_completa = f.data_pedido
-WHERE f.status = 'pago'
-GROUP BY d.ano, d.mes, d.nome_mes
-ORDER BY d.ano, d.mes;
+    dp.categoria,
+    SUM(f.valor) AS receita_total,
+    SUM(f.quantidade) AS itens_vendidos
+FROM fato_vendas AS f
+JOIN dim_produto AS dp ON f.sk_produto = dp.sk_produto
+JOIN dim_tempo   AS dt ON f.sk_tempo   = dt.sk_tempo
+WHERE dt.mes = 1 AND dt.ano = 2024
+GROUP BY dp.categoria
+ORDER BY receita_total DESC;
+
+-- 💡 O que acontece se mudar?
+-- Compare a query acima com a query OLTP do bloco 1
+-- Mesmo resultado, mas no DW: sem JOIN em pedidos, clientes, itens_pedido e categorias
 
 
--- Top 3 produtos mais vendidos por faturamento
-SELECT
-    p.nome           AS produto,
-    p.categoria,
-    COUNT(f.id_pedido) AS total_vendas,
-    SUM(f.total)     AS faturamento
-FROM fato_pedidos f
-JOIN dim_produtos p ON p.id_produto = f.id_produto
-WHERE f.status = 'pago'
-GROUP BY p.nome, p.categoria
-ORDER BY faturamento DESC
-LIMIT 3;
+-- ─────────────────────────────────────────
+-- BLOCO 5: MERGE — upsert (insert + update em uma operação)
+-- O que vamos aprender: MERGE resolve carga incremental elegantemente
+-- ⏱️ ~6 minutos
+-- ─────────────────────────────────────────
+
+-- Problema: ao recarregar dados, precisamos:
+--   → Inserir registros novos
+--   → Atualizar registros que mudaram
+--   → (Opcionalmente) deletar registros que sumiram
+
+-- MERGE resolve tudo isso em uma instrução
+
+-- Simula uma staging com dados atualizados (cliente mudou de cidade)
+CREATE TABLE #stg_clientes_delta (
+    id_cliente INT,
+    nome       VARCHAR(100),
+    cidade     VARCHAR(50),
+    uf         CHAR(2)
+);
+
+INSERT INTO #stg_clientes_delta VALUES
+(1,  'Ana Lima',      'Campinas',   'SP'),  -- mudou de cidade
+(2,  'Bruno Santos',  'Rio de Janeiro', 'RJ'),  -- sem mudança
+(11, 'Karen Dias',    'Belém',      'PA');   -- cliente novo no DW
+
+-- MERGE: atualiza quem existe, insere quem é novo
+MERGE dim_cliente AS destino
+USING (
+    SELECT id_cliente, nome, cidade, uf FROM #stg_clientes_delta
+) AS origem (id_cliente, nome, cidade, uf)
+ON destino.id_cliente_origem = origem.id_cliente AND destino.ativo = 1
+
+WHEN MATCHED AND (destino.cidade <> origem.cidade OR destino.uf <> origem.uf) THEN
+    UPDATE SET
+        destino.cidade = origem.cidade,
+        destino.uf     = origem.uf
+
+WHEN NOT MATCHED BY TARGET THEN
+    INSERT (id_cliente_origem, nome, cidade, uf, data_inicio, ativo)
+    VALUES (origem.id_cliente, origem.nome, origem.cidade, origem.uf, CAST(GETDATE() AS DATE), 1);
+
+DROP TABLE #stg_clientes_delta;
+
+-- Verifica o resultado
+SELECT sk_cliente, id_cliente_origem, nome, cidade, uf, ativo
+FROM dim_cliente
+ORDER BY id_cliente_origem;
+
+-- 💡 O que acontece se mudar?
+-- Adicione WHEN NOT MATCHED BY SOURCE THEN UPDATE SET ativo = 0
+-- para "desativar" clientes que sumiram da staging
 
 
--- Faturamento por estado do cliente
-SELECT
-    c.estado,
-    COUNT(DISTINCT f.id_cliente)  AS clientes_compradores,
-    COUNT(f.id_pedido)            AS total_pedidos,
-    SUM(f.total)                  AS faturamento
-FROM fato_pedidos f
-JOIN dim_clientes c ON c.id_cliente = f.id_cliente
-WHERE f.status = 'pago'
-GROUP BY c.estado
-ORDER BY faturamento DESC;
+-- ─────────────────────────────────────────
+-- BLOCO 6: SCD Tipo 1 vs SCD Tipo 2
+-- O que vamos aprender: como tratar mudanças históricas nos dados dimensionais
+-- ⏱️ ~5 minutos
+-- ─────────────────────────────────────────
 
+-- SCD Tipo 1 — sobrescreve o valor antigo (sem histórico)
+-- Quando usar: correção de erro, dado sem valor histórico
+-- Exemplo: nome do cliente foi digitado errado
 
--- Ticket médio por categoria
-SELECT
-    p.categoria,
-    ROUND(AVG(f.total), 2) AS ticket_medio
-FROM fato_pedidos f
-JOIN dim_produtos p ON p.id_produto = f.id_produto
-WHERE f.status = 'pago'
-GROUP BY p.categoria
-ORDER BY ticket_medio DESC;
+UPDATE dim_cliente
+SET nome = 'Ana Lima Correto'
+WHERE id_cliente_origem = 1 AND ativo = 1;
 
+-- Desfaz para ficar limpo
+UPDATE dim_cliente
+SET nome = 'Ana Lima'
+WHERE id_cliente_origem = 1 AND ativo = 1;
 
--- -------------------------------------------------------------
--- 4. SIMULANDO ELT COM CTE
--- (transformação dentro do banco, estilo dbt)
--- -------------------------------------------------------------
+-- SCD Tipo 2 — preserva o histórico criando uma nova linha
+-- Quando usar: mudanças com impacto histórico (cidade, categoria, preço)
+-- Exemplo: cliente Ana mudou de SP para RJ — queremos saber onde ela morava quando comprou
 
--- Camada 1: staging (dados brutos limpos)
-WITH stg_pedidos AS (
-    SELECT
-        id,
-        cliente_id,
-        produto_id,
-        total,
-        status,
-        criado_em
-    FROM pedidos
-    WHERE total IS NOT NULL
-),
+-- Passo 1: fecha o registro atual (define data_fim)
+UPDATE dim_cliente
+SET data_fim = DATEADD(DAY, -1, CAST(GETDATE() AS DATE)),
+    ativo    = 0
+WHERE id_cliente_origem = 1 AND ativo = 1;
 
--- Camada 2: intermediate (enriquece com dimensões)
-int_pedidos AS (
-    SELECT
-        f.id,
-        c.nome        AS cliente,
-        c.estado,
-        p.nome        AS produto,
-        p.categoria,
-        f.total,
-        f.status,
-        f.criado_em,
-        EXTRACT(YEAR FROM f.criado_em)  AS ano,
-        EXTRACT(MONTH FROM f.criado_em) AS mes
-    FROM stg_pedidos f
-    JOIN clientes c ON c.id = f.cliente_id
-    JOIN produtos p ON p.id = f.produto_id
-),
+-- Passo 2: insere novo registro com os dados atualizados
+INSERT INTO dim_cliente (id_cliente_origem, nome, cidade, uf, data_inicio, ativo)
+VALUES (1, 'Ana Lima', 'Rio de Janeiro', 'RJ', CAST(GETDATE() AS DATE), 1);
 
--- Camada 3: mart (agregação final para o BI)
-mart_faturamento AS (
-    SELECT
-        ano,
-        mes,
-        estado,
-        categoria,
-        COUNT(*)      AS pedidos,
-        SUM(total)    AS faturamento
-    FROM int_pedidos
-    WHERE status = 'pago'
-    GROUP BY ano, mes, estado, categoria
-)
+-- Resultado: duas versões de Ana no DW
+SELECT sk_cliente, nome, cidade, uf, data_inicio, data_fim, ativo
+FROM dim_cliente
+WHERE id_cliente_origem = 1
+ORDER BY data_inicio;
 
-SELECT * FROM mart_faturamento
-ORDER BY ano, mes, faturamento DESC;
+-- As vendas antigas continuam apontando para a versão antiga (SK antiga)!
+-- Isso é a vantagem do SCD Tipo 2: histórico preservado automaticamente
 
+-- 💡 O que acontece se mudar?
+-- O MERGE do bloco anterior pode ser adaptado para SCD Tipo 2:
+-- WHEN MATCHED AND dados mudaram THEN UPDATE SET ativo=0, data_fim=hoje
+-- + INSERT da nova linha (isso é feito com dois passos separados no MERGE)
 
--- -------------------------------------------------------------
--- 5. Limpeza
--- -------------------------------------------------------------
-DROP TABLE IF EXISTS dim_clientes;
-DROP TABLE IF EXISTS dim_produtos;
-DROP TABLE IF EXISTS dim_data;
-DROP TABLE IF EXISTS fato_pedidos;
+-- Resumo: SCD Tipo 1 = simples, sem histórico
+--         SCD Tipo 2 = histórico completo, mais complexo, sk_cliente diferente por versão
+GO

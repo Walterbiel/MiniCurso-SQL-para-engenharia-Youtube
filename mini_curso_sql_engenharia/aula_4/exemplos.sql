@@ -1,147 +1,226 @@
--- =============================================================
--- AULA 4: Index, Constraints e Partições
--- Pré-requisito: execute banco.sql antes
--- =============================================================
+-- ============================================
+-- AULA 4: Index e Constraints
+-- Arquivo: aula_4/exemplos.sql
+-- ⏱️  Tempo estimado: 25 minutos
+-- 📍 Posição no roteiro: Parte 4 de 5
+-- ============================================
+-- Objetivo: Garantir performance e qualidade dos dados.
+-- Pré-requisito: execute banco.sql antes desta aula.
+
+USE loja_db;
+GO
+
+-- ═══════════════════════════════════════════
+-- PARTE 1: ÍNDICES
+-- ═══════════════════════════════════════════
+
+-- ─────────────────────────────────────────
+-- BLOCO 1: O que é índice e como o banco o usa
+-- O que vamos aprender: índice = sumário que acelera a busca
+-- ⏱️ ~5 minutos
+-- ─────────────────────────────────────────
+
+-- Sem índice: o banco lê TODAS as linhas para encontrar o dado (table scan)
+-- Com índice: o banco vai direto ao dado (index seek)
+
+-- Analogia: imagine buscar um nome em um livro sem índice remissivo
+-- vs buscar no índice e ir direto à página certa.
+
+-- Ver os índices existentes na tabela clientes
+SELECT
+    i.name          AS nome_indice,
+    i.type_desc     AS tipo,
+    i.is_primary_key,
+    i.is_unique,
+    STRING_AGG(c.name, ', ') WITHIN GROUP (ORDER BY ic.key_ordinal) AS colunas
+FROM sys.indexes     AS i
+JOIN sys.index_columns AS ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+JOIN sys.columns     AS c  ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+WHERE OBJECT_NAME(i.object_id) = 'clientes'
+GROUP BY i.name, i.type_desc, i.is_primary_key, i.is_unique;
+
+-- 💡 O que acontece se mudar?
+-- Troque 'clientes' por 'pedidos' ou 'produtos' — veja os índices de cada tabela
 
 
--- -------------------------------------------------------------
--- 1. ÍNDICES
--- -------------------------------------------------------------
+-- ─────────────────────────────────────────
+-- BLOCO 2: Clustered vs Nonclustered
+-- O que vamos aprender: clustered organiza os dados; nonclustered é uma estrutura separada
+-- ⏱️ ~8 minutos
+-- ─────────────────────────────────────────
 
--- Verificar se uma query faz full scan (sem índice)
-EXPLAIN SELECT * FROM pedidos WHERE cliente_id = 5;
+-- CLUSTERED INDEX:
+-- → Os dados da tabela ficam fisicamente ordenados por esse índice
+-- → Cada tabela pode ter APENAS 1 clustered index
+-- → Normalmente é a PRIMARY KEY
 
--- Criar índice na coluna cliente_id
-CREATE INDEX idx_pedidos_cliente ON pedidos(cliente_id);
+-- Exemplo: a tabela pedidos já tem clustered index na PK (id_pedido)
+-- O banco armazena os pedidos ordenados por id_pedido fisicamente no disco
 
--- Verificar agora — deve usar o índice
-EXPLAIN SELECT * FROM pedidos WHERE cliente_id = 5;
+-- NONCLUSTERED INDEX:
+-- → Estrutura separada que aponta para os dados
+-- → Uma tabela pode ter vários nonclustered indexes
+-- → Ideal para colunas muito usadas em WHERE, JOIN e ORDER BY
 
+-- Criando um nonclustered index na coluna data_pedido
+-- (busca por período é muito comum em análise de dados)
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name = 'idx_pedidos_data' AND OBJECT_NAME(object_id) = 'pedidos'
+)
+    CREATE NONCLUSTERED INDEX idx_pedidos_data
+    ON pedidos (data_pedido);
 
--- Índice em coluna de data (muito comum em dados)
-CREATE INDEX idx_pedidos_data ON pedidos(criado_em);
+-- Criando índice composto: status + data_pedido
+-- Útil quando filtramos por status E período ao mesmo tempo
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name = 'idx_pedidos_status_data' AND OBJECT_NAME(object_id) = 'pedidos'
+)
+    CREATE NONCLUSTERED INDEX idx_pedidos_status_data
+    ON pedidos (status, data_pedido);
 
--- Query com range de datas agora usa o índice
-EXPLAIN SELECT * FROM pedidos
-WHERE criado_em BETWEEN '2023-01-01' AND '2023-06-30';
+-- Criando índice com INCLUDE: evita ir à tabela para buscar valor_total
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name = 'idx_pedidos_cliente' AND OBJECT_NAME(object_id) = 'pedidos'
+)
+    CREATE NONCLUSTERED INDEX idx_pedidos_cliente
+    ON pedidos (id_cliente)
+    INCLUDE (data_pedido, valor_total, status);  -- colunas extras no índice
 
+-- Consultas que agora usam os índices criados:
+SELECT id_pedido, status, valor_total
+FROM pedidos
+WHERE data_pedido BETWEEN '2024-01-01' AND '2024-03-31';  -- usa idx_pedidos_data
 
--- Índice composto: útil para queries com dois filtros juntos
-CREATE INDEX idx_pedidos_cliente_status ON pedidos(cliente_id, status);
+SELECT id_pedido, data_pedido, valor_total
+FROM pedidos
+WHERE id_cliente = 1;  -- usa idx_pedidos_cliente (com INCLUDE)
 
-EXPLAIN SELECT * FROM pedidos
-WHERE cliente_id = 1 AND status = 'pago';
-
-
--- Ver todos os índices de uma tabela
-SELECT indexname, indexdef
-FROM pg_indexes
-WHERE tablename = 'pedidos';
-
-
--- Remover índice
-DROP INDEX IF EXISTS idx_pedidos_cliente;
-DROP INDEX IF EXISTS idx_pedidos_data;
-DROP INDEX IF EXISTS idx_pedidos_cliente_status;
-
-
--- -------------------------------------------------------------
--- 2. CONSTRAINTS
--- -------------------------------------------------------------
-
--- Criando tabela com todas as constraints
-CREATE TABLE fornecedores (
-    id        SERIAL PRIMARY KEY,                          -- PRIMARY KEY
-    cnpj      VARCHAR(18) NOT NULL UNIQUE,                 -- NOT NULL + UNIQUE
-    nome      VARCHAR(100) NOT NULL,
-    email     VARCHAR(100),
-    ativo     BOOLEAN DEFAULT TRUE,                        -- DEFAULT
-    criado_em DATE DEFAULT CURRENT_DATE
-);
-
--- CHECK constraint: garante que o valor é válido
-CREATE TABLE contratos (
-    id           SERIAL PRIMARY KEY,
-    fornecedor_id INT REFERENCES fornecedores(id),         -- FOREIGN KEY
-    valor        NUMERIC(12, 2) CHECK (valor > 0),         -- CHECK
-    data_inicio  DATE NOT NULL,
-    data_fim     DATE,
-    CHECK (data_fim IS NULL OR data_fim > data_inicio)     -- CHECK entre colunas
-);
-
--- Testar constraints
-
--- Isso vai funcionar
-INSERT INTO fornecedores (cnpj, nome) VALUES ('12.345.678/0001-99', 'Fornecedor A');
-
--- Isso vai falhar (UNIQUE violation)
--- INSERT INTO fornecedores (cnpj, nome) VALUES ('12.345.678/0001-99', 'Outro');
-
--- Isso vai falhar (NOT NULL violation)
--- INSERT INTO fornecedores (cnpj, nome) VALUES (NULL, 'Sem CNPJ');
+-- 💡 O que acontece se mudar?
+-- Crie um índice em clientes.cidade e em clientes.uf
+-- Pense: quais colunas de itens_pedido merecem índice?
 
 
--- Adicionar constraint em tabela existente
-ALTER TABLE produtos ADD CONSTRAINT chk_preco_positivo CHECK (preco > 0);
-ALTER TABLE pedidos  ADD CONSTRAINT chk_quantidade_positiva CHECK (quantidade > 0);
+-- ─────────────────────────────────────────
+-- BLOCO 3: Impacto em leitura e escrita
+-- O que vamos aprender: mais índice não é sempre melhor
+-- ⏱️ ~4 minutos
+-- ─────────────────────────────────────────
 
--- Ver constraints de uma tabela
-SELECT constraint_name, constraint_type
-FROM information_schema.table_constraints
-WHERE table_name = 'pedidos';
+-- LEITURA (SELECT): índice melhora — o banco vai direto ao dado
+-- ESCRITA (INSERT/UPDATE/DELETE): índice piora — o banco precisa atualizar cada índice
 
--- Remover constraint
-ALTER TABLE produtos DROP CONSTRAINT IF EXISTS chk_preco_positivo;
-ALTER TABLE pedidos  DROP CONSTRAINT IF EXISTS chk_quantidade_positiva;
+-- Regra prática para engenharia de dados:
+--   - Colunas de filtro (WHERE): criar índice
+--   - Colunas de JOIN: criar índice
+--   - Colunas de ORDER BY em relatórios: criar índice
+--   - Tabelas de staging (carga em massa): REMOVER índices antes, criar depois
 
+-- Ver todos os índices da tabela pedidos com seus tipos
+SELECT
+    i.name         AS nome_indice,
+    i.type_desc    AS tipo,
+    i.is_unique,
+    STRING_AGG(c.name, ', ') WITHIN GROUP (ORDER BY ic.key_ordinal) AS colunas_chave
+FROM sys.indexes       AS i
+JOIN sys.index_columns AS ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+                              AND ic.is_included_column = 0
+JOIN sys.columns       AS c  ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+WHERE OBJECT_NAME(i.object_id) = 'pedidos'
+GROUP BY i.name, i.type_desc, i.is_unique;
 
--- -------------------------------------------------------------
--- 3. PARTICIONAMENTO (RANGE por data)
--- -------------------------------------------------------------
-
--- Criar tabela particionada por ano
-DROP TABLE IF EXISTS pedidos_particionados;
-
-CREATE TABLE pedidos_particionados (
-    id           SERIAL,
-    cliente_id   INT,
-    produto_id   INT,
-    total        NUMERIC(10, 2),
-    status       VARCHAR(20),
-    criado_em    DATE NOT NULL
-) PARTITION BY RANGE (criado_em);
-
-
--- Criar as partições (uma por ano)
-CREATE TABLE pedidos_2023
-    PARTITION OF pedidos_particionados
-    FOR VALUES FROM ('2023-01-01') TO ('2024-01-01');
-
-CREATE TABLE pedidos_2024
-    PARTITION OF pedidos_particionados
-    FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
+-- 💡 O que acontece se mudar?
+-- Uma tabela de staging que recebe 10 milhões de linhas por dia
+-- Se tiver 5 índices, cada INSERT atualiza 6 estruturas (tabela + 5 índices)
+-- Solução: DROP INDEX antes da carga, CREATE INDEX depois
 
 
--- Inserir dados na tabela principal (vai para a partição certa automaticamente)
-INSERT INTO pedidos_particionados (cliente_id, produto_id, total, status, criado_em)
-SELECT cliente_id, produto_id, total, status, criado_em FROM pedidos;
+-- ═══════════════════════════════════════════
+-- PARTE 2: CONSTRAINTS
+-- ═══════════════════════════════════════════
 
--- Consultar normalmente (o banco decide qual partição ler)
-SELECT * FROM pedidos_particionados WHERE criado_em >= '2023-01-01';
+-- ─────────────────────────────────────────
+-- BLOCO 4: Constraints — regras de qualidade no banco
+-- O que vamos aprender: constraints protegem a integridade dos dados na fonte
+-- ⏱️ ~8 minutos
+-- ─────────────────────────────────────────
 
--- Ver qual partição será usada
-EXPLAIN SELECT * FROM pedidos_particionados
-WHERE criado_em BETWEEN '2023-01-01' AND '2023-12-31';
+-- Ver as constraints existentes no banco
+SELECT
+    tc.CONSTRAINT_NAME  AS constraint,
+    tc.CONSTRAINT_TYPE  AS tipo,
+    tc.TABLE_NAME       AS tabela,
+    kcu.COLUMN_NAME     AS coluna
+FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS      AS tc
+JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE       AS kcu
+     ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+    AND tc.TABLE_NAME      = kcu.TABLE_NAME
+ORDER BY tc.TABLE_NAME, tc.CONSTRAINT_TYPE;
 
--- Ver as partições existentes
-SELECT inhrelid::regclass AS particao
-FROM pg_inherits
-WHERE inhparent = 'pedidos_particionados'::regclass;
+-- PRIMARY KEY — identidade única da linha (já vimos na aula 1)
+-- Não permite NULL, não permite duplicata
+-- Cada tabela tem exatamente uma PK
 
+-- UNIQUE — unicidade sem ser PK (permite ONE NULL em SQL Server)
+-- Exemplo: email de cliente deve ser único, mas não é a PK
+SELECT CONSTRAINT_NAME, CONSTRAINT_TYPE, TABLE_NAME
+FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS
+WHERE TABLE_NAME = 'clientes' AND CONSTRAINT_TYPE = 'UNIQUE';
 
--- -------------------------------------------------------------
--- 4. Limpeza
--- -------------------------------------------------------------
-DROP TABLE IF EXISTS contratos;
-DROP TABLE IF EXISTS fornecedores;
-DROP TABLE IF EXISTS pedidos_particionados CASCADE;
+-- Testando: tentativa de email duplicado
+-- INSERT INTO clientes VALUES (20, 'Teste', 'ana@email.com', 'SP', 'SP', '2024-01-01');
+-- Erro: "Cannot insert duplicate key row in object 'dbo.clientes' with unique index"
+
+-- FOREIGN KEY — integridade referencial (já vimos na aula 1)
+-- Garante que a referência sempre exista
+SELECT
+    fk.name                       AS constraint_name,
+    OBJECT_NAME(fk.parent_object_id)     AS tabela_origem,
+    COL_NAME(fkc.parent_object_id, fkc.parent_column_id)   AS coluna_origem,
+    OBJECT_NAME(fk.referenced_object_id) AS tabela_destino
+FROM sys.foreign_keys     AS fk
+JOIN sys.foreign_key_columns AS fkc ON fk.object_id = fkc.constraint_object_id;
+
+-- NOT NULL — campo obrigatório
+-- Em produtos, nome e preco são NOT NULL
+-- INSERT INTO produtos VALUES (99, NULL, 1, 100, 0);  → erro: "Cannot insert the value NULL"
+
+-- CHECK — regra de domínio definida em SQL
+-- Exemplos já criados no banco.sql:
+--   chk_preco_positivo: preco > 0
+--   chk_qtd_positiva:   quantidade > 0
+--   chk_status:         status IN ('pendente','aprovado','enviado','entregue','cancelado')
+
+-- Ver todas as CHECK constraints
+SELECT
+    cc.CONSTRAINT_NAME,
+    cc.TABLE_NAME,
+    cc.CHECK_CLAUSE
+FROM INFORMATION_SCHEMA.CHECK_CONSTRAINTS AS cc
+JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS tc
+     ON cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME;
+
+-- Testando: preço negativo
+-- INSERT INTO produtos VALUES (99, 'Teste', 1, -50, 0);
+-- Erro: "The INSERT statement conflicted with the CHECK constraint 'chk_preco_positivo'"
+
+-- Adicionando uma nova CHECK constraint
+ALTER TABLE clientes
+ADD CONSTRAINT chk_uf_valido
+CHECK (uf IN ('AC','AL','AP','AM','BA','CE','DF','ES','GO','MA','MT','MS',
+              'MG','PA','PB','PR','PE','PI','RJ','RN','RS','RO','RR','SC',
+              'SP','SE','TO'));
+
+-- Testando a nova constraint
+-- INSERT INTO clientes VALUES (20, 'Teste', 'xx@email.com', 'XX', 'ZZ', '2024-01-01');
+-- Erro: conflito com chk_uf_valido
+
+-- Removendo a constraint (só para manter o banco limpo)
+ALTER TABLE clientes DROP CONSTRAINT chk_uf_valido;
+
+-- 💡 O que acontece se mudar?
+-- Crie uma CHECK constraint em pedidos para garantir que valor_total >= 0
+-- Pense: qual constraint protegeria contra um estoque negativo em produtos?
+GO
