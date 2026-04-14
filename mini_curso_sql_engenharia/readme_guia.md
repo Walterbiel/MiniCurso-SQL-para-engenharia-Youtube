@@ -1,18 +1,20 @@
 # 🎬 Guia de Aula — Mini Curso SQL para Engenharia de Dados
 
-> Documento principal de gravação. Tudo está aqui — leia de cima pra baixo e grave.
-> Os arquivos `.sql` são só referência se quiser copiar/colar ou mostrar no editor.
+> **Como usar este guia:** Leia de cima pra baixo enquanto grava. Tudo está aqui — o que falar, o que rodar, o que apontar na tela. Os arquivos `.sql` são referência de cópia/cola.
 
 **Total: ~2h25 | 5 aulas | SQL Server (T-SQL)**
 
 ---
 
-## ⚡ Antes de Gravar
+## ⚡ Checklist Antes de Gravar
 
-- [ ] Executar `banco.sql` — cria `loja_db` e `dw_loja`
+- [ ] Rodar `banco.sql` — cria `loja_db` (OLTP) e `dw_loja` (DW)
 - [ ] Confirmar as duas databases no Object Explorer
-- [ ] Fonte do editor: 16-18px
+- [ ] Confirmar que as 5 tabelas de `loja_db` existem: clientes, categorias, produtos, pedidos, itens_pedido
+- [ ] Confirmar que `dw_loja` tem: stg_pedidos, dim_cliente, dim_produto, dim_tempo, fato_vendas
+- [ ] Fonte do editor: 16–18px
 - [ ] Notificações do Windows: silenciadas
+- [ ] Abrir SSMS com `loja_db` selecionada por padrão
 
 ---
 
@@ -21,142 +23,252 @@
 # AULA 1 — Fundamentos de Bancos Relacionais
 **⏱️ ~25 min** | Arquivo de referência: [`aula_1/exemplos.sql`](aula_1/exemplos.sql)
 
-> **Falar na abertura:**
-> "A maioria aprende SQL só dando SELECT. Hoje você vai entender como o banco funciona por dentro — e isso é o que separa quem usa banco de quem entende banco."
+> **Abertura — falar devagar:**
+> "A maioria aprende SQL só dando SELECT. Mas quem trabalha com engenharia de dados precisa entender como o banco funciona por dentro: por que os dados estão organizados daquele jeito, o que garante que eles são válidos, e o que acontece quando você tenta inserir algo errado. Isso é o que muda quem *usa* banco de quem *entende* banco."
 
 ---
 
-### 1.1 — O que é um banco relacional
+### 1.1 — O que é um Banco Relacional
 
-**Falar:** "Dados organizados em tabelas. Cada tabela é uma entidade do negócio. O banco guarda metadados — você consegue perguntar pro próprio banco o que ele tem."
+**Conceito para falar:**
+"Um banco relacional organiza dados em tabelas. Cada tabela representa uma entidade do mundo real — clientes, produtos, pedidos. O que torna esse modelo poderoso é que as tabelas se relacionam entre si por meio de chaves. Você não duplica o nome do cliente em cada pedido — você guarda o ID do cliente e busca o nome quando precisa. Isso é normalização."
+
+"Outro ponto importante: o banco guarda *metadados* — dados sobre os próprios dados. Você consegue perguntar pro banco o que ele tem, quais tabelas existem, quais colunas cada tabela tem, quais regras estão definidas. Isso é o que vamos fazer agora."
 
 ```sql
 USE loja_db;
 
--- Quais tabelas existem?
-SELECT TABLE_NAME AS tabela
+-- O banco guarda informações sobre si mesmo
+-- INFORMATION_SCHEMA é uma view padrão SQL ANSI — funciona em qualquer banco
+SELECT
+    TABLE_NAME   AS tabela,
+    TABLE_TYPE   AS tipo
 FROM INFORMATION_SCHEMA.TABLES
-WHERE TABLE_TYPE = 'BASE TABLE';
+WHERE TABLE_TYPE = 'BASE TABLE'
+ORDER BY TABLE_NAME;
 ```
 
-**Apontar no resultado:** 5 tabelas — clientes, categorias, produtos, pedidos, itens_pedido.
+**O que apontar no resultado:**
+5 tabelas — clientes, categorias, produtos, pedidos, itens_pedido. "Cada uma é uma entidade do negócio."
 
 ```sql
--- Quais colunas tem a tabela clientes?
-SELECT COLUMN_NAME     AS coluna,
-       DATA_TYPE       AS tipo,
-       IS_NULLABLE     AS aceita_nulo
+-- Agora vamos ver a estrutura detalhada de uma tabela
+-- Isso é o que um engenheiro faz antes de qualquer coisa: entende o dado que vai trabalhar
+SELECT
+    COLUMN_NAME     AS coluna,
+    DATA_TYPE       AS tipo_de_dado,
+    CHARACTER_MAXIMUM_LENGTH AS tamanho_max,
+    IS_NULLABLE     AS aceita_nulo,
+    COLUMN_DEFAULT  AS valor_padrao
 FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_NAME = 'clientes';
+WHERE TABLE_NAME = 'clientes'
+ORDER BY ORDINAL_POSITION;
 ```
 
-**Falar:** "Veja que email aceita nulo, mas nome não. Isso já é uma regra de negócio definida no banco."
+**O que apontar:**
+- `nome` — NOT NULL. Regra de negócio: cliente sem nome não existe.
+- `email` — NULL. Opcional.
+- `data_cadastro` — tem `COLUMN_DEFAULT`. Banco preenche sozinho se não vier.
+
+"Repara que isso não é só documentação — essas regras são *enforced* pelo banco. Se você tentar inserir um cliente sem nome, o banco vai rejeitar. Na aula 4 a gente vai falar mais sobre isso com Constraints."
 
 ---
 
-### 1.2 — Primary Key
+### 1.2 — Primary Key: a identidade de cada linha
 
-**Falar:** "Toda linha precisa ser identificável de forma única. A Primary Key garante isso — não existe dois clientes com o mesmo id."
+**Conceito para falar:**
+"Todo registro precisa ser identificável de forma única e definitiva. Não pode existir dois clientes com o mesmo ID. Não pode existir dois produtos com o mesmo ID. A Primary Key garante isso."
 
-```sql
-SELECT id_cliente, nome, email
-FROM clientes;
-```
-
-**Falar:** "Se eu tentar inserir um id repetido..."
+"Ela faz duas coisas ao mesmo tempo: garante unicidade (não pode repetir) e garante que o valor não é NULL (você não pode ter uma linha sem identidade). E como bônus — o banco automaticamente cria um índice na PK, o que faz busca por ID ser extremamente rápida."
 
 ```sql
--- Execute e mostre o erro
-INSERT INTO clientes VALUES (1, 'Duplicado', 'dup@email.com', 'SP', 'SP', '2024-01-01');
+-- Veja os dados de clientes — o id_cliente é a PK
+SELECT
+    id_cliente,
+    nome,
+    email,
+    cidade,
+    uf
+FROM clientes
+ORDER BY id_cliente;
 ```
 
-**Apontar:** Erro `Violation of PRIMARY KEY constraint`. "O banco rejeita. Isso é integridade."
+**Falar:** "10 clientes, IDs de 1 a 10. Agora vamos tentar inserir um com ID que já existe."
+
+```sql
+-- Tente executar — vai dar erro
+-- Isso é integridade na prática
+INSERT INTO clientes
+    (id_cliente, nome, email, cidade, uf, data_cadastro)
+VALUES
+    (1, 'João Duplicado', 'joao2@email.com', 'São Paulo', 'SP', '2024-01-01');
+```
+
+**O que apontar:**
+Erro `Violation of PRIMARY KEY constraint 'PK__clientes...'`.
+
+"O banco rejeita. Não importa se veio de um app, de um pipeline, de um script manual — a PK protege a unicidade de forma absoluta. Isso é *integridade de entidade*."
 
 ---
 
-### 1.3 — Foreign Key
+### 1.3 — Foreign Key: o elo entre tabelas
 
-**Falar:** "FK é o elo entre tabelas. Um pedido pertence a um cliente — a FK garante que esse cliente exista."
+**Conceito para falar:**
+"Se a PK é a identidade de uma linha, a Foreign Key é o elo entre tabelas. Um pedido pertence a um cliente. Esse vínculo é representado pela coluna `id_cliente` na tabela `pedidos` — ela aponta para a PK da tabela `clientes`."
+
+"A FK garante *integridade referencial*: você não pode criar um pedido para um cliente que não existe. E você não pode deletar um cliente que tem pedidos associados. O banco protege os dois lados do relacionamento."
 
 ```sql
-SELECT p.id_pedido,
-       c.nome    AS cliente,
-       p.status
+-- Visualizando pedidos com seus clientes via FK
+-- O JOIN funciona exatamente porque essa relação é definida no banco
+SELECT
+    p.id_pedido,
+    c.nome          AS cliente,
+    c.cidade,
+    p.data_pedido,
+    p.status,
+    p.valor_total
 FROM pedidos   AS p
-JOIN clientes  AS c ON p.id_cliente = c.id_cliente;
+JOIN clientes  AS c ON p.id_cliente = c.id_cliente
+ORDER BY p.data_pedido;
 ```
 
-**Falar:** "Se eu tentar criar um pedido para um cliente que não existe..."
+**Falar:** "Agora tente criar um pedido para um cliente inexistente."
 
 ```sql
--- Execute e mostre o erro
-INSERT INTO pedidos VALUES (99, 999, '2024-01-01', 'pendente', 0);
+-- Erro esperado: violação de FK
+INSERT INTO pedidos
+    (id_pedido, id_cliente, data_pedido, status, valor_total)
+VALUES
+    (99, 999, '2024-01-01', 'pendente', 0);
 ```
 
-**Apontar:** Erro de FK. "O banco protege a integridade automaticamente."
+**O que apontar:**
+Erro `The INSERT statement conflicted with the FOREIGN KEY constraint`.
+
+"O banco não deixou. ID 999 não existe em clientes — então não pode existir um pedido para ele. Sem FK, isso passaria silenciosamente e você teria dados corrompidos no banco."
+
+```sql
+-- O outro lado da FK: tenta deletar um cliente que tem pedidos
+DELETE FROM clientes WHERE id_cliente = 1;
+```
+
+**O que apontar:**
+Erro de FK na direção contrária. "O banco também protege a deleção. Você não pode deixar pedidos 'órfãos', sem cliente."
 
 ---
 
 ### 1.4 — Relacionamentos: 1:N e N:N
 
-**Falar:** "Um cliente tem vários pedidos — isso é 1 para N. Um pedido tem vários produtos, e um produto aparece em vários pedidos — isso é N para N."
+**Conceito para falar:**
+"Entender o tipo de relacionamento entre tabelas é o que determina como você vai fazer JOIN. Existem três tipos principais."
+
+**1 para 1 (1:1):** Raro. Uma pessoa tem um único CPF.
+**1 para N (1:N):** O mais comum. Um cliente tem vários pedidos. Uma categoria tem vários produtos.
+**N para N (N:N):** Um pedido tem vários produtos, e um produto aparece em vários pedidos.
+
+"O N:N não se representa direto no banco relacional. Você precisa de uma *tabela associativa* no meio. No nosso caso é a `itens_pedido` — ela resolve o N:N entre pedidos e produtos."
 
 ```sql
 -- 1:N — um cliente, vários pedidos
-SELECT c.nome,
-       COUNT(p.id_pedido) AS total_pedidos
+-- COUNT mostra quantos pedidos cada cliente tem
+SELECT
+    c.nome                  AS cliente,
+    COUNT(p.id_pedido)      AS total_pedidos,
+    SUM(p.valor_total)      AS valor_total_gasto
 FROM clientes AS c
 LEFT JOIN pedidos AS p ON c.id_cliente = p.id_cliente
-GROUP BY c.nome
+GROUP BY c.id_cliente, c.nome
 ORDER BY total_pedidos DESC;
 ```
 
-**Falar:** "Para o N:N, existe uma tabela no meio — itens_pedido. Ela é a tabela associativa."
+**Falar:** "LEFT JOIN aqui porque queremos ver TODOS os clientes, mesmo os que nunca compraram. Com INNER JOIN, eles sumiram."
 
 ```sql
--- N:N — pedido com vários produtos
-SELECT pr.nome     AS produto,
-       i.quantidade
+-- N:N — pedido com vários produtos (via tabela associativa itens_pedido)
+-- Visualize o pedido 8 — ele tem 3 produtos diferentes
+SELECT
+    p.id_pedido,
+    pr.nome         AS produto,
+    i.quantidade,
+    i.preco_unitario,
+    i.quantidade * i.preco_unitario  AS subtotal
 FROM pedidos      AS p
 JOIN itens_pedido AS i  ON p.id_pedido  = i.id_pedido
 JOIN produtos     AS pr ON i.id_produto = pr.id_produto
-WHERE p.id_pedido = 8;
+WHERE p.id_pedido = 8
+ORDER BY subtotal DESC;
 ```
 
-**Apontar:** Pedido 8 tem 3 produtos diferentes. Mude para `id_pedido = 1` e mostre outro.
+**O que apontar:** "Itens_pedido tem duas FKs — id_pedido e id_produto. Ela resolve o N:N sendo a tabela do meio. Troque para id_pedido = 1 e veja outro pedido."
 
 ---
 
 ### 1.5 — Transações e ACID
 
-**Falar:** "Transação é tudo ou nada. Se qualquer passo falhar, tudo é desfeito. Isso é o A do ACID — Atomicidade."
+**Conceito para falar:**
+"Uma transação é um conjunto de operações que deve ser executado como uma unidade. Tudo ou nada. Se qualquer passo falhar, tudo é desfeito como se nunca tivesse acontecido. Isso é o coração do ACID."
+
+**ACID:**
+- **A**tomicidade: tudo executa, ou nada executa
+- **C**onsistência: o banco nunca fica em estado inválido
+- **I**solamento: transações simultâneas não interferem entre si
+- **D**urabilidade: dado confirmado com COMMIT sobrevive a qualquer falha
+
+"Na engenharia de dados isso importa em carga de dados. Se você está inserindo 100.000 linhas em uma tabela e o servidor cai no meio, o que acontece? Sem transação: metade das linhas está lá, metade não. Com transação: nada foi confirmado, você reprocessa do zero."
 
 ```sql
+-- Simulando uma venda completa como uma transação atômica
 BEGIN TRANSACTION;
 
-    INSERT INTO pedidos VALUES (20, 1, GETDATE(), 'pendente', 0);
+    -- Cria o pedido
+    INSERT INTO pedidos (id_pedido, id_cliente, data_pedido, status, valor_total)
+    VALUES (20, 1, GETDATE(), 'pendente', 0);
 
-    INSERT INTO itens_pedido VALUES (50, 20, 9, 2, 79.90);
-    INSERT INTO itens_pedido VALUES (51, 20, 7, 1, 45.00);
+    -- Adiciona os itens
+    INSERT INTO itens_pedido (id_item, id_pedido, id_produto, quantidade, preco_unitario)
+    VALUES (50, 20, 9, 2, 79.90);
 
+    INSERT INTO itens_pedido (id_item, id_pedido, id_produto, quantidade, preco_unitario)
+    VALUES (51, 20, 7, 1, 45.00);
+
+    -- Atualiza o valor total com base nos itens inseridos
     UPDATE pedidos
-    SET valor_total = (SELECT SUM(quantidade * preco_unitario)
-                       FROM itens_pedido WHERE id_pedido = 20)
+    SET valor_total = (
+        SELECT SUM(quantidade * preco_unitario)
+        FROM itens_pedido
+        WHERE id_pedido = 20
+    )
     WHERE id_pedido = 20;
 
 COMMIT;
 ```
 
 ```sql
--- Confirma que tudo foi salvo junto
-SELECT id_pedido, status, valor_total FROM pedidos WHERE id_pedido = 20;
-SELECT * FROM itens_pedido WHERE id_pedido = 20;
+-- Confirma que tudo foi salvo junto — pedido + itens + valor correto
+SELECT id_pedido, status, valor_total FROM pedidos       WHERE id_pedido = 20;
+SELECT *                              FROM itens_pedido  WHERE id_pedido = 20;
 ```
 
-**Falar:** "Se eu trocasse COMMIT por ROLLBACK, nada disso apareceria. O banco desfaz tudo. ACID na prática: A=tudo ou nada, C=banco nunca fica inválido, I=transações não interferem entre si, D=dado confirmado sobrevive a falha."
+**Falar:** "Se eu trocasse `COMMIT` por `ROLLBACK`, nada disso apareceria. O banco desfaz tudo — como se nunca tivesse acontecido. É isso que protege a consistência dos dados mesmo quando o processo falha."
 
 ```sql
--- Limpeza
+-- Demonstração: ROLLBACK desfaz tudo
+BEGIN TRANSACTION;
+    INSERT INTO pedidos (id_pedido, id_cliente, data_pedido, status, valor_total)
+    VALUES (21, 2, GETDATE(), 'pendente', 150.00);
+    
+    -- Veja que o pedido existe DENTRO da transação
+    SELECT id_pedido, status FROM pedidos WHERE id_pedido = 21;
+
+ROLLBACK;
+
+-- Agora confirme que não existe mais
+SELECT id_pedido, status FROM pedidos WHERE id_pedido = 21;
+```
+
+```sql
+-- Limpeza do pedido 20 que foi commitado
 DELETE FROM itens_pedido WHERE id_pedido = 20;
 DELETE FROM pedidos      WHERE id_pedido = 20;
 ```
@@ -165,313 +277,589 @@ DELETE FROM pedidos      WHERE id_pedido = 20;
 
 ### 1.6 — CRUD na visão de engenharia
 
-**Falar:** "CRUD todo mundo conhece. O ponto de engenheiro é: UPDATE e DELETE sempre com WHERE. Sem WHERE, você afeta a tabela inteira."
+**Conceito para falar:**
+"CRUD — Create, Read, Update, Delete — todo mundo conhece. O que muda na perspectiva de engenheiro de dados são os riscos e as boas práticas."
+
+"O maior perigo é o UPDATE e o DELETE sem WHERE. Sem cláusula WHERE, você afeta **todas** as linhas da tabela. Em produção, isso é catastrófico. Sempre execute um SELECT com o mesmo WHERE antes de rodar um UPDATE ou DELETE importante — confirme quantas linhas vão ser afetadas."
 
 ```sql
-INSERT INTO clientes VALUES (11, 'Karen Dias', 'karen@email.com', 'Manaus', 'AM', CAST(GETDATE() AS DATE));
+-- BOAS PRÁTICAS DE CRUD
 
-SELECT id_cliente, nome, cidade FROM clientes WHERE id_cliente = 11;
+-- INSERT: sempre especifique as colunas — nunca confie na ordem
+INSERT INTO clientes (id_cliente, nome, email, cidade, uf, data_cadastro)
+VALUES (11, 'Karen Dias', 'karen@email.com', 'Manaus', 'AM', CAST(GETDATE() AS DATE));
 
-UPDATE clientes SET cidade = 'Belém', uf = 'PA' WHERE id_cliente = 11;
+-- READ: confirma a inserção
+SELECT id_cliente, nome, cidade, uf
+FROM clientes
+WHERE id_cliente = 11;
 
+-- UPDATE: SEMPRE com WHERE. Antes de rodar, faça o SELECT primeiro
+-- SELECT * FROM clientes WHERE id_cliente = 11; -- confirma antes
+UPDATE clientes
+SET cidade = 'Belém',
+    uf     = 'PA'
+WHERE id_cliente = 11;
+
+-- Confirma o update
+SELECT id_cliente, nome, cidade, uf FROM clientes WHERE id_cliente = 11;
+
+-- DELETE: mesmo cuidado com WHERE
 DELETE FROM clientes WHERE id_cliente = 11;
+
+-- Confirma a deleção
+SELECT id_cliente, nome FROM clientes WHERE id_cliente = 11;
 ```
 
-**Falar:** "Agora tenta deletar um cliente que tem pedido."
+**Falar:** "Repara que o DELETE funcionou porque esse cliente não tinha pedidos. Agora tente deletar um que tem."
 
 ```sql
--- Mostre o erro de FK
+-- FK impedindo DELETE em cascata acidental
+-- Isso protege integridade dos dados
 DELETE FROM clientes WHERE id_cliente = 1;
 ```
 
-**Apontar:** Erro de FK. "O banco bloqueia porque existem pedidos ligados a esse cliente. Integridade referencial protegendo seus dados."
+**O que apontar:**
+Erro de FK. "O banco bloqueou. Ana Lima tem pedidos registrados — você não pode deletar ela sem antes lidar com os pedidos. Isso é *integridade referencial* protegendo seus dados de corrupção."
 
-> **Encerramento da aula 1:**
-> "Agora você sabe como o banco funciona por dentro. Na próxima aula a gente começa a usar SQL de verdade — como ferramenta de transformação de dados."
+> **Encerramento da aula 1 — falar:**
+> "Agora você sabe como o banco funciona por dentro: tabelas relacionadas, chaves garantindo integridade, transações garantindo consistência. Na próxima aula a gente começa a usar SQL como ferramenta de transformação de dados — o papel real do SQL em engenharia."
 
 ---
 
 ---
 
-# AULA 2 — SQL para Engenharia de Dados
+# AULA 2 — SQL como Motor de Transformação de Dados
 **⏱️ ~35 min** | Arquivo de referência: [`aula_2/exemplos.sql`](aula_2/exemplos.sql)
 
-> **Falar na abertura:**
-> "SQL não é só SELECT * FROM tabela. É uma linguagem de transformação. Tudo que você vai ver hoje você usa em pipeline, em dbt, em Spark SQL — a sintaxe muda um pouco, mas o conceito é o mesmo."
+> **Abertura — falar:**
+> "SQL não é só SELECT * FROM tabela. É uma linguagem de transformação. Tudo que você vai ver hoje — CASE WHEN, JOIN, GROUP BY, CTE, Window Functions — você usa em pipeline de dados, em dbt, em Spark SQL, em BigQuery. A sintaxe muda um pouco entre plataformas, mas o conceito é exatamente o mesmo. Aprenda o conceito, você aprende todas as plataformas de uma vez."
 
 ---
 
 ### 2.1 — SELECT bem estruturado
 
-**Falar:** "Esses dois SELECTs retornam o mesmo resultado. Mas um é código de produção, o outro é código de improviso."
+**Conceito para falar:**
+"O SELECT é a instrução mais executada em qualquer sistema. Em engenharia de dados, você vai escrever SELECTs que viram pipelines, que ficam em repositórios, que são revisados em PR, que são mantidos por outras pessoas. Código SQL mal escrito é dívida técnica."
+
+"Dois SELECTs abaixo retornam o mesmo resultado. Mas um é código de produção, o outro é código de improviso."
 
 ```sql
--- Feio — funciona, mas dificulta manutenção
+-- RUIM — funciona, mas é ilegível e impossível de manter
 SELECT nome,preco,estoque,preco*estoque FROM produtos;
 
--- Limpo — legível, com alias e formatação
+-- BOM — legível, auditável, com alias descritivos
 SELECT
-    nome                  AS produto,
-    preco                 AS preco_unitario,
-    estoque               AS qtd_em_estoque,
-    preco * estoque       AS valor_em_estoque
+    nome                        AS produto,
+    preco                       AS preco_unitario,
+    estoque                     AS qtd_em_estoque,
+    preco * estoque             AS valor_total_em_estoque,
+    CASE
+        WHEN estoque < 5 THEN 'Crítico'
+        WHEN estoque < 20 THEN 'Baixo'
+        ELSE 'Normal'
+    END                         AS status_estoque
 FROM produtos
-ORDER BY valor_em_estoque DESC;
+ORDER BY valor_total_em_estoque DESC;
 ```
 
-**Falar:** "Em engenharia de dados, SELECT limpo é pipeline legível e auditável."
+**Falar:** "Alias descritivos, cálculos explícitos, lógica de negócio legível. Qualquer engenheiro na equipe entende o que esse SELECT faz sem precisar perguntar. Em pipeline, SELECT limpo é pipeline auditável."
 
 ---
 
-### 2.2 — WHERE e filtros
+### 2.2 — Ordem de execução do SQL (conceito crítico)
 
-**Falar:** "Filtrar cedo evita processar dado desnecessário. Cada linha a menos que você carrega é processamento economizado."
+**Conceito para falar — este é um dos pontos mais importantes da aula:**
+"Existe uma ilusão comum sobre SQL: as pessoas escrevem na ordem SELECT → FROM → WHERE → GROUP BY. Mas o banco executa em outra ordem. E entender essa ordem explica comportamentos que parecem estranhos."
+
+**Ordem real de execução:**
+```
+1. FROM       → de onde vêm os dados (e JOINs)
+2. WHERE      → filtra linhas individuais
+3. GROUP BY   → agrupa as linhas restantes
+4. HAVING     → filtra os grupos
+5. SELECT     → calcula as colunas e alias
+6. ORDER BY   → ordena o resultado final
+7. LIMIT/TOP  → limita a quantidade
+```
+
+"Por isso você NÃO PODE usar um alias do SELECT dentro do WHERE — o WHERE roda antes do SELECT ser calculado. E NÃO PODE usar uma função de agregação no WHERE — ela só existe depois do GROUP BY."
 
 ```sql
--- IN — substitui vários OR
-SELECT id_pedido, status
+-- Demonstração da ordem de execução
+-- WHERE roda antes do GROUP BY e antes do SELECT
+-- Por isso não funciona: WHERE total_gasto > 1000 (alias do SELECT)
+-- Por isso funciona: HAVING SUM(valor_total) > 1000
+
+SELECT
+    c.nome,
+    SUM(p.valor_total)  AS total_gasto,
+    COUNT(p.id_pedido)  AS qtd_pedidos
+FROM clientes AS c
+JOIN pedidos  AS p ON c.id_cliente = p.id_cliente
+WHERE p.status = 'entregue'          -- filtra linhas ANTES do agrupamento
+GROUP BY c.id_cliente, c.nome
+HAVING SUM(p.valor_total) > 1000     -- filtra grupos DEPOIS do agrupamento
+ORDER BY total_gasto DESC;
+```
+
+---
+
+### 2.3 — WHERE e filtros eficientes
+
+**Conceito para falar:**
+"Filtrar cedo é um princípio de performance. Cada linha a menos que o banco processa é CPU e memória economizados. Em tabelas com milhões de linhas, um WHERE mal escrito pode transformar uma query de 2 segundos em 2 minutos."
+
+```sql
+-- IN — substitui múltiplos OR (mais legível e geralmente mais eficiente)
+SELECT id_pedido, status, valor_total
 FROM pedidos
 WHERE status IN ('pendente', 'aprovado', 'enviado');
 
--- BETWEEN — intervalo inclusivo
+-- BETWEEN — intervalo inclusivo (inclui as duas datas extremas)
 SELECT id_pedido, data_pedido, valor_total
 FROM pedidos
 WHERE data_pedido BETWEEN '2024-01-01' AND '2024-03-31';
 
--- LIKE — padrão de texto
+-- LIKE — busca por padrão em texto
+-- % = qualquer sequência de caracteres
+-- _ = exatamente um caractere
 SELECT nome, email
 FROM clientes
-WHERE email LIKE '%@email.com';
+WHERE email LIKE '%@email.com';     -- termina com @email.com
+
+-- IS NULL / IS NOT NULL — nunca use = NULL, isso não funciona em SQL
+SELECT nome, email
+FROM clientes
+WHERE email IS NULL;                -- clientes sem email cadastrado
+
+-- Filtro composto com AND e OR — use parênteses para clareza
+SELECT id_pedido, status, valor_total, data_pedido
+FROM pedidos
+WHERE (status = 'pendente' OR status = 'aprovado')
+  AND valor_total > 200
+  AND data_pedido >= '2024-03-01';
 ```
+
+**Falar sobre NULL:** "NULL não é zero, não é string vazia, não é falso. NULL significa *ausência de valor*. NULL = NULL retorna NULL, não verdadeiro. Por isso você usa IS NULL — não = NULL."
 
 ---
 
-### 2.3 — CASE WHEN
+### 2.4 — CASE WHEN: lógica de negócio dentro do SQL
 
-**Falar:** "CASE WHEN é a forma de colocar regra de negócio dentro do SQL. Você transforma o dado na consulta, sem precisar de código externo."
+**Conceito para falar:**
+"CASE WHEN é a forma de colocar *regra de negócio* diretamente no SQL. Em vez de buscar o dado cru e tratar no Python depois, você transforma o dado dentro da query. Em pipeline ELT, isso é o que acontece na camada T — de Transformação."
 
 ```sql
+-- CASE com range de valores: categorização de produtos por faixa de preço
 SELECT
     nome,
     preco,
     CASE
-        WHEN preco < 100  THEN 'Básico'
-        WHEN preco < 500  THEN 'Intermediário'
-        WHEN preco < 2000 THEN 'Premium'
-        ELSE                   'Ultra Premium'
-    END AS faixa_preco
+        WHEN preco < 50    THEN 'Econômico'
+        WHEN preco < 200   THEN 'Básico'
+        WHEN preco < 1000  THEN 'Intermediário'
+        WHEN preco < 3000  THEN 'Premium'
+        ELSE                    'Ultra Premium'
+    END AS faixa_preco,
+    -- CASE também funciona dentro de agregações
+    CASE WHEN estoque = 0 THEN 'Sem Estoque' ELSE 'Disponível' END AS disponibilidade
 FROM produtos
 ORDER BY preco;
 ```
 
 ```sql
+-- CASE com valor exato: classificação de receita por status de pedido
+-- Esse padrão é clássico em ETL — você transforma status em categorias analíticas
 SELECT
     id_pedido,
+    data_pedido,
     status,
     valor_total,
     CASE status
-        WHEN 'entregue'  THEN 'Receita Confirmada'
-        WHEN 'cancelado' THEN 'Receita Perdida'
-        ELSE                  'Em Andamento'
+        WHEN 'entregue'   THEN 'Receita Confirmada'
+        WHEN 'cancelado'  THEN 'Receita Perdida'
+        WHEN 'devolvido'  THEN 'Receita Estornada'
+        ELSE                   'Em Andamento'
     END AS classificacao_receita
-FROM pedidos;
+FROM pedidos
+ORDER BY data_pedido;
 ```
 
-**Falar:** "Esse segundo exemplo é exatamente o tipo de transformação que você faria em um pipeline ELT."
+```sql
+-- CASE dentro de agregação: pivot manual — transforma linhas em colunas
+-- Padrão muito usado em relatórios e dashboards
+SELECT
+    YEAR(data_pedido)   AS ano,
+    MONTH(data_pedido)  AS mes,
+    SUM(CASE WHEN status = 'entregue'  THEN valor_total ELSE 0 END) AS receita_confirmada,
+    SUM(CASE WHEN status = 'cancelado' THEN valor_total ELSE 0 END) AS receita_perdida,
+    COUNT(CASE WHEN status = 'pendente' THEN 1 END)                 AS pedidos_pendentes
+FROM pedidos
+GROUP BY YEAR(data_pedido), MONTH(data_pedido)
+ORDER BY ano, mes;
+```
+
+**Falar:** "Esse último exemplo é um pivot manual. Você transforma valores de uma coluna (status) em colunas separadas. É exatamente o que você faria num pipeline de transformação para alimentar um dashboard."
 
 ---
 
-### 2.4 — JOINs
+### 2.5 — JOINs: combinando tabelas
 
-**Falar:** "JOIN é o conceito mais importante de SQL relacional. Vou mostrar INNER, LEFT, e JOIN múltiplo. Presta atenção em quantas linhas cada um retorna."
+**Conceito para falar:**
+"JOIN é o conceito mais importante de SQL relacional. É o que permite que você desnormalize os dados na hora da consulta — sem precisar duplicar dados no banco. Presta atenção especialmente em *quantas linhas* cada tipo de JOIN retorna."
+
+**Tipos de JOIN:**
+- **INNER JOIN**: só retorna linhas que têm correspondência nos dois lados
+- **LEFT JOIN**: retorna TODAS as linhas da esquerda + correspondência da direita (NULL onde não há)
+- **RIGHT JOIN**: o inverso do LEFT (evite — use LEFT JOIN invertendo as tabelas, é mais claro)
+- **FULL OUTER JOIN**: todos de ambos os lados
+- **CROSS JOIN**: produto cartesiano (cada linha com cada linha)
 
 ```sql
--- INNER JOIN — só quem existe nos dois lados
-SELECT c.nome, p.id_pedido, p.valor_total
+-- INNER JOIN — interseção: só quem existe nos dois lados
+-- Clientes sem pedido NÃO aparecem
+SELECT
+    c.nome           AS cliente,
+    p.id_pedido,
+    p.data_pedido,
+    p.valor_total
 FROM clientes AS c
-INNER JOIN pedidos AS p ON c.id_cliente = p.id_cliente;
+INNER JOIN pedidos AS p ON c.id_cliente = p.id_cliente
+ORDER BY c.nome;
 ```
 
-**Apontar:** X linhas. "Clientes sem pedido não aparecem."
+**Apontar:** Quantas linhas? Menos que o total de clientes. "Clientes sem pedido sumiram."
 
 ```sql
--- LEFT JOIN — todos da esquerda, com NULL onde não há correspondência
-SELECT c.nome, p.id_pedido, p.status
+-- LEFT JOIN — todos da esquerda, correspondência ou NULL da direita
+-- Clientes SEM pedido aparecem com NULL nos campos de pedido
+SELECT
+    c.nome           AS cliente,
+    p.id_pedido,
+    p.status,
+    p.valor_total
 FROM clientes AS c
-LEFT JOIN pedidos AS p ON c.id_cliente = p.id_cliente;
+LEFT JOIN pedidos AS p ON c.id_cliente = p.id_cliente
+ORDER BY c.nome;
 ```
 
-**Apontar:** Mais linhas, com NULLs. "Agora aparece todo mundo."
+**Apontar:** Mais linhas. Alguns com NULL em id_pedido. "Esses são os clientes que nunca compraram."
 
 ```sql
--- Filtrar: quem NUNCA comprou
-SELECT c.nome AS cliente_sem_pedido
+-- Padrão clássico: quem NUNCA fez X
+-- LEFT JOIN + WHERE IS NULL é mais eficiente que NOT EXISTS em muitos bancos
+SELECT
+    c.nome AS cliente_sem_pedido,
+    c.cidade,
+    c.data_cadastro
 FROM clientes AS c
 LEFT JOIN pedidos AS p ON c.id_cliente = p.id_cliente
 WHERE p.id_pedido IS NULL;
 ```
 
 ```sql
--- JOIN múltiplo — atravessa 4 tabelas
+-- JOIN múltiplo — atravessa 4 tabelas para montar a visão completa de uma venda
+-- Isso é o que você faria para alimentar uma camada analítica
 SELECT
-    c.nome           AS cliente,
-    pr.nome          AS produto,
+    c.nome                              AS cliente,
+    c.cidade,
+    pr.nome                             AS produto,
+    cat.nome                            AS categoria,
     i.quantidade,
-    i.quantidade * i.preco_unitario AS subtotal
+    i.preco_unitario,
+    i.quantidade * i.preco_unitario     AS subtotal,
+    p.data_pedido
 FROM clientes     AS c
-JOIN pedidos      AS p  ON c.id_cliente  = p.id_cliente
-JOIN itens_pedido AS i  ON p.id_pedido   = i.id_pedido
-JOIN produtos     AS pr ON i.id_produto  = pr.id_produto
+JOIN pedidos      AS p   ON c.id_cliente   = p.id_cliente
+JOIN itens_pedido AS i   ON p.id_pedido    = i.id_pedido
+JOIN produtos     AS pr  ON i.id_produto   = pr.id_produto
+JOIN categorias   AS cat ON pr.id_categoria = cat.id_categoria
 WHERE p.status = 'entregue'
 ORDER BY subtotal DESC;
 ```
 
-**Falar:** "É assim que você constrói uma visão desnormalizada pra análise — juntando as peças do modelo relacional."
+**Falar:** "É assim que você constrói uma visão desnormalizada para análise — montando as peças do modelo relacional em um único conjunto de dados. Esse SELECT é literalmente o que vai para a camada de staging de um Data Warehouse."
 
 ---
 
-### 2.5 — GROUP BY e HAVING
+### 2.6 — GROUP BY e HAVING
 
-**Falar:** "GROUP BY resume dados por dimensão. É a base de qualquer relatório e de qualquer agregação num pipeline."
+**Conceito para falar:**
+"GROUP BY *colapsa* linhas em grupos. Você perde o detalhe de cada linha individual e ganha um resumo por grupo. É a base de qualquer relatório, qualquer KPI, qualquer agregação num pipeline de dados."
+
+"HAVING é o filtro que roda **depois** do agrupamento — ele filtra *grupos*, não linhas. WHERE filtra linhas antes do agrupamento. Essa distinção é uma das dúvidas mais comuns em SQL."
 
 ```sql
+-- Análise de clientes: total de pedidos e valor gasto
+-- Funções de agregação: COUNT, SUM, AVG, MIN, MAX
 SELECT
-    c.nome             AS cliente,
-    COUNT(p.id_pedido) AS total_pedidos,
-    SUM(p.valor_total) AS valor_total_gasto,
-    AVG(p.valor_total) AS ticket_medio
+    c.nome                  AS cliente,
+    COUNT(p.id_pedido)      AS total_pedidos,
+    SUM(p.valor_total)      AS valor_total_gasto,
+    AVG(p.valor_total)      AS ticket_medio,
+    MIN(p.data_pedido)      AS primeiro_pedido,
+    MAX(p.data_pedido)      AS ultimo_pedido
 FROM clientes AS c
 JOIN pedidos  AS p ON c.id_cliente = p.id_cliente
-WHERE p.status = 'entregue'
-GROUP BY c.nome
+WHERE p.status = 'entregue'     -- WHERE filtra ANTES: só pedidos entregues entram no grupo
+GROUP BY c.id_cliente, c.nome
 ORDER BY valor_total_gasto DESC;
 ```
 
-**Falar:** "HAVING é o filtro que roda DEPOIS do agrupamento. WHERE roda antes. Essa é uma das confusões mais comuns."
-
 ```sql
+-- HAVING: filtra após o agrupamento
+-- Use quando o critério depende do resultado da agregação
 SELECT
     c.nome,
-    SUM(p.valor_total) AS total_gasto
+    SUM(p.valor_total)   AS total_gasto,
+    COUNT(p.id_pedido)   AS qtd_pedidos
 FROM clientes AS c
 JOIN pedidos  AS p ON c.id_cliente = p.id_cliente
 WHERE p.status = 'entregue'
-GROUP BY c.nome
-HAVING SUM(p.valor_total) > 1000
+GROUP BY c.id_cliente, c.nome
+HAVING SUM(p.valor_total) > 1000    -- só clientes que gastaram mais de 1000
 ORDER BY total_gasto DESC;
 ```
 
-**Falar:** "Tenta colocar esse filtro no WHERE — o banco vai dar erro. WHERE não conhece o resultado do GROUP BY ainda."
+**Falar:** "Tente colocar `total_gasto > 1000` no WHERE — o banco vai retornar erro ou resultado incorreto. O alias 'total_gasto' não existe quando o WHERE é avaliado. E SUM() no WHERE também falha — agregação só existe depois do GROUP BY."
+
+```sql
+-- Análise por categoria: receita e quantidade por categoria de produto
+SELECT
+    cat.nome                AS categoria,
+    COUNT(DISTINCT i.id_pedido) AS pedidos_com_esta_cat,
+    SUM(i.quantidade)       AS unidades_vendidas,
+    SUM(i.quantidade * i.preco_unitario) AS receita_total,
+    AVG(i.preco_unitario)   AS preco_medio_vendido
+FROM categorias   AS cat
+JOIN produtos     AS pr ON cat.id_categoria = pr.id_categoria
+JOIN itens_pedido AS i  ON pr.id_produto    = i.id_produto
+JOIN pedidos      AS p  ON i.id_pedido      = p.id_pedido
+WHERE p.status = 'entregue'
+GROUP BY cat.id_categoria, cat.nome
+ORDER BY receita_total DESC;
+```
 
 ---
 
-### 2.6 — Subquery e CTE
+### 2.7 — Subquery e CTE
 
-**Falar:** "Às vezes você precisa de uma consulta que depende de outra. Tem duas formas: subquery inline ou CTE. CTE é mais legível — recomendo para qualquer coisa acima de 5 linhas."
+**Conceito para falar:**
+"Às vezes você precisa de uma consulta que depende do resultado de outra. Tem duas formas principais: subquery inline (aninhada) ou CTE — Common Table Expression."
+
+"A CTE, definida com WITH, é como uma 'tabela temporária com nome'. Você a escreve antes do SELECT principal, dá um nome a ela, e usa esse nome como se fosse uma tabela. Em termos de performance são equivalentes na maioria dos bancos — mas CTE é muito mais legível e fácil de debugar."
 
 ```sql
--- Subquery: produtos acima da média de preço
-SELECT nome, preco
+-- SUBQUERY ESCALAR: retorna um único valor para comparação
+-- Produtos com preço acima da média
+SELECT
+    nome,
+    preco,
+    ROUND(preco - (SELECT AVG(preco) FROM produtos), 2) AS diferenca_da_media
 FROM produtos
 WHERE preco > (SELECT AVG(preco) FROM produtos)
-ORDER BY preco;
+ORDER BY preco DESC;
 ```
 
 ```sql
--- CTE — mesma lógica, mais legível
-WITH resumo_pedidos AS (
+-- CTE — mesma lógica, mais organizada e extensível
+-- Forma recomendada para qualquer coisa acima de uma linha
+WITH media_precos AS (
+    SELECT AVG(preco) AS preco_medio FROM produtos
+),
+produtos_acima AS (
     SELECT
-        id_pedido,
-        SUM(quantidade)                  AS total_itens,
-        SUM(quantidade * preco_unitario) AS valor_calculado
-    FROM itens_pedido
-    GROUP BY id_pedido
+        p.nome,
+        p.preco,
+        p.preco - m.preco_medio AS acima_da_media
+    FROM produtos   AS p
+    CROSS JOIN media_precos AS m
+    WHERE p.preco > m.preco_medio
 )
-SELECT
-    p.id_pedido,
-    p.status,
-    r.total_itens,
-    r.valor_calculado
-FROM pedidos        AS p
-JOIN resumo_pedidos AS r ON p.id_pedido = r.id_pedido
-ORDER BY r.valor_calculado DESC;
+SELECT * FROM produtos_acima ORDER BY acima_da_media DESC;
 ```
 
-**Falar:** "A CTE vira uma 'tabela temporária com nome'. Você pode referenciar ela depois como se fosse uma tabela normal."
+```sql
+-- CTE prática: resumo de pedidos para enriquecer análise principal
+WITH resumo_itens AS (
+    SELECT
+        id_pedido,
+        COUNT(DISTINCT id_produto)           AS qtd_produtos_distintos,
+        SUM(quantidade)                      AS total_unidades,
+        SUM(quantidade * preco_unitario)     AS valor_calculado
+    FROM itens_pedido
+    GROUP BY id_pedido
+),
+clientes_resumo AS (
+    SELECT
+        c.id_cliente,
+        c.nome,
+        COUNT(p.id_pedido)                   AS total_pedidos,
+        SUM(p.valor_total)                   AS total_gasto
+    FROM clientes AS c
+    JOIN pedidos  AS p ON c.id_cliente = p.id_cliente
+    GROUP BY c.id_cliente, c.nome
+)
+-- Query principal referencia as CTEs como tabelas normais
+SELECT
+    cr.nome              AS cliente,
+    cr.total_pedidos,
+    cr.total_gasto,
+    p.id_pedido,
+    ri.qtd_produtos_distintos,
+    ri.total_unidades,
+    ri.valor_calculado
+FROM clientes_resumo  AS cr
+JOIN pedidos          AS p  ON cr.id_cliente = p.id_cliente
+JOIN resumo_itens     AS ri ON p.id_pedido   = ri.id_pedido
+ORDER BY cr.total_gasto DESC, p.id_pedido;
+```
+
+**Falar:** "Duas CTEs encadeadas, cada uma fazendo sua parte do trabalho. O SELECT final é limpo e legível. Isso é como você escreve transformações complexas em dbt — cada CTE é um passo do pipeline."
 
 ---
 
-### 2.7 — Window Functions
+### 2.8 — Window Functions
 
-**Falar:** "Window function é o que muda o nível do seu SQL. GROUP BY colapsa as linhas — você perde o detalhe. OVER não colapsa — você agrega e mantém todas as linhas."
+**Conceito para falar:**
+"Window Function é o que separa quem conhece SQL básico de quem conhece SQL de verdade. E é absolutamente fundamental em engenharia de dados."
+
+"A diferença do GROUP BY: GROUP BY **colapsa** as linhas — você perde o detalhe. Window Function **não colapsa** — você agrega e ainda mantém todas as linhas originais. A função 'janela' (OVER) define sobre quais linhas o cálculo se aplica."
+
+**Sintaxe:**
+```
+FUNÇÃO() OVER (
+    PARTITION BY coluna_agrupadora   -- opcional: como o GROUP BY
+    ORDER BY     coluna_ordenação    -- opcional: para ranking e acumulado
+    ROWS BETWEEN ...                 -- opcional: define o tamanho da janela
+)
+```
 
 ```sql
--- ROW_NUMBER: número do pedido por cliente
+-- ROW_NUMBER: numera as linhas dentro de cada partição
+-- Caso de uso: pegar o pedido mais recente de cada cliente
 SELECT
-    c.nome,
+    c.nome          AS cliente,
     p.id_pedido,
     p.data_pedido,
     p.valor_total,
     ROW_NUMBER() OVER (
-        PARTITION BY p.id_cliente
-        ORDER BY p.data_pedido
-    ) AS numero_pedido_do_cliente
+        PARTITION BY p.id_cliente    -- reinicia a contagem para cada cliente
+        ORDER BY p.data_pedido DESC  -- ordena do mais recente
+    ) AS ordem_por_cliente
 FROM pedidos  AS p
 JOIN clientes AS c ON p.id_cliente = c.id_cliente
-ORDER BY c.nome, p.data_pedido;
+ORDER BY c.nome, p.data_pedido DESC;
 ```
 
-**Apontar:** "Veja que Ana tem pedido 1, 2, 3 — reinicia por cliente. PARTITION BY é o 'agrupador', ORDER BY é a ordenação dentro de cada grupo."
+**Apontar:** "Cada cliente tem numeração própria: 1, 2, 3... que reinicia para o próximo cliente. PARTITION BY é o 'agrupador' da janela. ORDER BY define a sequência dentro de cada grupo."
 
 ```sql
--- SUM OVER: receita acumulada
+-- Usando ROW_NUMBER para pegar o ÚLTIMO pedido de cada cliente
+-- Padrão clássico em deduplucação e "latest record"
+WITH pedidos_numerados AS (
+    SELECT
+        p.*,
+        c.nome AS cliente,
+        ROW_NUMBER() OVER (
+            PARTITION BY p.id_cliente
+            ORDER BY p.data_pedido DESC
+        ) AS rn
+    FROM pedidos  AS p
+    JOIN clientes AS c ON p.id_cliente = c.id_cliente
+)
+SELECT cliente, id_pedido, data_pedido, valor_total
+FROM pedidos_numerados
+WHERE rn = 1   -- só o mais recente de cada cliente
+ORDER BY cliente;
+```
+
+```sql
+-- RANK e DENSE_RANK: ranking com tratamento de empates
+-- RANK: pula posições em caso de empate (1, 1, 3, 4)
+-- DENSE_RANK: não pula posições (1, 1, 2, 3)
+SELECT
+    nome,
+    preco,
+    RANK()       OVER (ORDER BY preco DESC) AS rank_preco,
+    DENSE_RANK() OVER (ORDER BY preco DESC) AS dense_rank_preco
+FROM produtos
+ORDER BY preco DESC;
+```
+
+```sql
+-- SUM/AVG OVER: agregação rodante (sem colapsar linhas)
+-- Receita acumulada ao longo do tempo
 SELECT
     data_pedido,
     valor_total,
     SUM(valor_total) OVER (
         ORDER BY data_pedido
         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    ) AS receita_acumulada
+    ) AS receita_acumulada,
+    AVG(valor_total) OVER (
+        ORDER BY data_pedido
+        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+    ) AS media_movel_3_dias
 FROM pedidos
 WHERE status = 'entregue'
 ORDER BY data_pedido;
 ```
 
-**Falar:** "Cada linha tem o valor do dia E o acumulado até aquele dia. Impossível fazer isso com GROUP BY sem perder as linhas individuais."
-
-> **Encerramento da aula 2:**
-> "Com isso você já consegue transformar dados de verdade. Na próxima aula a gente organiza essa lógica dentro do banco — views, procedures e funções."
-
----
-
----
-
-# AULA 3 — Views, Procedures e Funções
-**⏱️ ~25 min** | Arquivo de referência: [`aula_3/exemplos.sql`](aula_3/exemplos.sql)
-
-> **Falar na abertura:**
-> "Você aprendeu a escrever SQL. Agora você vai aprender a organizar esse SQL dentro do banco — para que qualquer pessoa, qualquer ferramenta, acesse sempre o dado do jeito certo."
-
----
-
-### 3.1 — VIEW
-
-**Falar:** "Sem VIEW, cada pessoa da equipe escreve o mesmo JOIN do zero — e cada um filtra de um jeito diferente. VIEW centraliza a lógica."
+**Falar:** "Cada linha tem o valor individual E o acumulado até aquele dia E a média dos últimos 3 registros. Impossível fazer isso com GROUP BY sem perder as linhas individuais. Em análise de séries temporais, isso é fundamental."
 
 ```sql
--- Problema: todo mundo reescreve isso
+-- LAG e LEAD: acessar linha anterior ou próxima
+-- Caso de uso: variação entre períodos (MoM, WoW)
+SELECT
+    data_pedido,
+    valor_total,
+    LAG(valor_total)  OVER (ORDER BY data_pedido) AS pedido_anterior,
+    LEAD(valor_total) OVER (ORDER BY data_pedido) AS proximo_pedido,
+    valor_total - LAG(valor_total) OVER (ORDER BY data_pedido) AS variacao
+FROM pedidos
+WHERE status = 'entregue'
+ORDER BY data_pedido;
+```
+
+> **Encerramento da aula 2 — falar:**
+> "Você agora tem as ferramentas fundamentais de transformação em SQL. Com isso você já resolve 80% dos desafios de dados do dia a dia. Na próxima aula a gente organiza essa lógica dentro do banco — views, procedures e funções — para que qualquer pessoa possa reutilizar sem reescrever."
+
+---
+
+---
+
+# AULA 3 — Objetos do Banco: Views, Procedures e Funções
+**⏱️ ~25 min** | Arquivo de referência: [`aula_3/exemplos.sql`](aula_3/exemplos.sql)
+
+> **Abertura — falar:**
+> "Você aprendeu a escrever SQL de transformação. Agora você vai aprender a *organizar* esse SQL dentro do banco — para que a lógica de negócio fique em um lugar só, seja reutilizável, e qualquer ferramenta ou pessoa acesse os dados sempre do jeito correto."
+
+---
+
+### 3.1 — VIEW: padronizando o consumo de dados
+
+**Conceito para falar:**
+"Sem VIEW, cada analista, cada dashboard, cada pipeline reescreve o mesmo JOIN do zero. Cada um filtra de um jeito diferente. Aí aparece o número errado no relatório e ninguém sabe de onde veio."
+
+"VIEW resolve isso centralizando a lógica. Você define a consulta uma vez, dá um nome a ela, e todo mundo consome pelo mesmo ponto. Quando a lógica precisa mudar, você muda em um lugar só."
+
+"Importante: VIEW não armazena dados. É uma consulta nomeada. Toda vez que você acessa a view, o SELECT interno é executado. Se quiser armazenar o resultado, você usa Materialized View ou tabela temporária."
+
+```sql
+-- O problema: todo mundo copia e cola esse JOIN
 SELECT c.nome, p.id_pedido, p.valor_total, p.status
 FROM clientes AS c
 JOIN pedidos  AS p ON c.id_cliente = p.id_cliente;
-```
 
-```sql
--- Solução: criar uma VIEW
+-- A solução: VIEW — encapsula e nomeia a lógica
 CREATE VIEW vw_pedidos_clientes AS
 SELECT
     c.id_cliente,
     c.nome          AS cliente,
     c.cidade,
+    c.uf,
     p.id_pedido,
     p.data_pedido,
     p.status,
@@ -481,91 +869,133 @@ JOIN pedidos  AS p ON c.id_cliente = p.id_cliente;
 ```
 
 ```sql
--- Consumir como se fosse tabela
+-- Consumir a VIEW como se fosse uma tabela
+-- Ninguém precisa saber o JOIN que está por baixo
 SELECT * FROM vw_pedidos_clientes WHERE status = 'entregue';
 
-SELECT cliente, SUM(valor_total) AS total
+SELECT
+    cliente,
+    SUM(valor_total) AS total_gasto
 FROM vw_pedidos_clientes
-GROUP BY cliente;
+WHERE status = 'entregue'
+GROUP BY cliente
+ORDER BY total_gasto DESC;
 ```
 
-**Falar:** "A VIEW não armazena dados. Toda vez que você consulta ela, o SELECT roda. É uma camada de abstração — você padroniza o consumo."
-
 ```sql
--- View de resumo: uma por cliente
-CREATE VIEW vw_resumo_cliente AS
+-- VIEW de resumo analítico: KPIs por cliente
+-- Esse é o tipo de view que alimenta um BI tool ou dashboard
+CREATE VIEW vw_kpis_cliente AS
 SELECT
     c.id_cliente,
-    c.nome,
-    COUNT(p.id_pedido) AS total_pedidos,
+    c.nome                  AS cliente,
+    c.cidade,
+    c.uf,
+    COUNT(p.id_pedido)      AS total_pedidos,
+    SUM(p.valor_total)      AS receita_total,
+    AVG(p.valor_total)      AS ticket_medio,
     SUM(CASE WHEN p.status = 'entregue'  THEN p.valor_total ELSE 0 END) AS receita_confirmada,
-    SUM(CASE WHEN p.status = 'cancelado' THEN p.valor_total ELSE 0 END) AS receita_perdida
+    SUM(CASE WHEN p.status = 'cancelado' THEN p.valor_total ELSE 0 END) AS receita_perdida,
+    MAX(p.data_pedido)      AS ultimo_pedido
 FROM clientes AS c
 LEFT JOIN pedidos AS p ON c.id_cliente = p.id_cliente
-GROUP BY c.id_cliente, c.nome;
+GROUP BY c.id_cliente, c.nome, c.cidade, c.uf;
 ```
 
 ```sql
-SELECT * FROM vw_resumo_cliente ORDER BY receita_confirmada DESC;
+SELECT * FROM vw_kpis_cliente ORDER BY receita_confirmada DESC;
+
+-- Você ainda pode filtrar e agregar em cima da VIEW
+SELECT uf, SUM(receita_confirmada) AS receita_por_estado
+FROM vw_kpis_cliente
+GROUP BY uf
+ORDER BY receita_por_estado DESC;
 ```
+
+**Falar:** "Esse padrão de views em camadas — uma para dados brutos, uma para KPIs, uma para resumo — é exatamente o que você implementa com dbt no mundo moderno. O conceito é o mesmo, a ferramenta muda."
 
 ---
 
-### 3.2 — Stored Procedures
+### 3.2 — Stored Procedure: lógica de processo no banco
 
-**Falar:** "Procedure é lógica de processo dentro do banco. Recebe parâmetros, executa passos, pode fazer INSERT, UPDATE, DELETE. É um step de pipeline dentro do SQL."
+**Conceito para falar:**
+"Procedure é diferente de VIEW. VIEW é para consultar dados. Procedure é para *executar um processo* — ela pode fazer SELECT, INSERT, UPDATE, DELETE, chamar outras procedures, controlar transações. É um step de pipeline dentro do banco."
+
+"Procedures aceitam parâmetros — você pode passar um período, um ID, uma configuração — e o resultado muda conforme os parâmetros. Em ETL tradicional, procedures são muito usadas para encapsular os passos da carga."
 
 ```sql
+-- Procedure de consulta parametrizada
+-- Retorna pedidos de um período específico
 CREATE PROCEDURE sp_pedidos_periodo
     @data_inicio DATE,
     @data_fim    DATE
 AS
 BEGIN
+    SET NOCOUNT ON;  -- boa prática: suprime mensagens de "X rows affected"
+
     SELECT
         p.id_pedido,
-        c.nome        AS cliente,
+        c.nome          AS cliente,
         p.data_pedido,
         p.status,
-        p.valor_total
-    FROM pedidos  AS p
-    JOIN clientes AS c ON p.id_cliente = c.id_cliente
+        p.valor_total,
+        COUNT(i.id_item) OVER (PARTITION BY p.id_pedido) AS qtd_itens
+    FROM pedidos      AS p
+    JOIN clientes     AS c ON p.id_cliente = c.id_cliente
+    JOIN itens_pedido AS i ON p.id_pedido  = i.id_pedido
     WHERE p.data_pedido BETWEEN @data_inicio AND @data_fim
-    ORDER BY p.data_pedido;
+    ORDER BY p.data_pedido, p.valor_total DESC;
 END;
 ```
 
 ```sql
--- Executar com parâmetros diferentes
-EXEC sp_pedidos_periodo '2024-01-01', '2024-03-31';
-EXEC sp_pedidos_periodo '2024-04-01', '2024-06-30';
+-- Executar com diferentes parâmetros
+EXEC sp_pedidos_periodo '2024-01-01', '2024-03-31';  -- Q1
+EXEC sp_pedidos_periodo '2024-04-01', '2024-06-30';  -- Q2
 ```
 
-**Falar:** "Veja — mesma procedure, resultados diferentes. Você passa o período, ela retorna o recorte certo. Em ETL, você chamaria essa procedure dentro do seu pipeline."
+**Falar:** "Mesma procedure, resultados diferentes conforme o parâmetro. Em ETL, você chamaria essa procedure dentro do seu pipeline passando a janela de data de cada execução."
 
 ```sql
--- Procedure de processo com valor padrão
+-- Procedure de processo com parâmetro com valor padrão
+-- Cancela pedidos pendentes há mais de N dias (padrão: 30)
 CREATE PROCEDURE sp_cancelar_pendentes
     @dias_limite INT = 30
 AS
 BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @pedidos_afetados INT;
+
+    -- Executa o UPDATE
     UPDATE pedidos
     SET status = 'cancelado'
     WHERE status = 'pendente'
       AND DATEDIFF(DAY, data_pedido, GETDATE()) > @dias_limite;
 
-    SELECT @@ROWCOUNT AS pedidos_cancelados, GETDATE() AS executado_em;
+    SET @pedidos_afetados = @@ROWCOUNT;
+
+    -- Retorna um log da execução
+    SELECT
+        @pedidos_afetados   AS pedidos_cancelados,
+        @dias_limite        AS criterio_dias,
+        GETDATE()           AS executado_em;
 END;
 ```
 
-**Falar:** "Esse parâmetro tem valor padrão — se não passar nada, usa 30 dias. Em produção, essa procedure seria agendada todo dia num job do SQL Server ou num Airflow."
+**Falar:** "O parâmetro com valor padrão: se você chamar sem argumentos, usa 30 dias. Se precisar de um critério diferente em algum mês, passa o parâmetro. Em produção, essa procedure seria agendada num job do SQL Server Agent ou disparada por um DAG do Airflow."
 
 ---
 
-### 3.3 — Funções escalares
+### 3.3 — Função Escalar: cálculo reutilizável
 
-**Falar:** "Função escalar retorna um único valor. Você usa ela dentro de um SELECT como se fosse uma coluna calculada."
+**Conceito para falar:**
+"Função escalar retorna um único valor. Você a usa dentro de um SELECT como se fosse uma coluna calculada. A diferença da procedure é que função pode ser usada dentro de expressões — dentro do SELECT, do WHERE, do ORDER BY."
+
+"O valor está em encapsular a regra de negócio. Se a regra de desconto mudar amanhã, você muda a função em um lugar só — todo SELECT que a usa já reflete o novo cálculo automaticamente."
 
 ```sql
+-- Função de desconto: recebe valor e percentual, retorna valor com desconto
 CREATE FUNCTION fn_valor_com_desconto
 (
     @valor        DECIMAL(10,2),
@@ -574,40 +1004,54 @@ CREATE FUNCTION fn_valor_com_desconto
 RETURNS DECIMAL(10,2)
 AS
 BEGIN
+    -- Validação: desconto não pode ser negativo nem maior que 100%
+    IF @pct_desconto < 0 OR @pct_desconto > 100
+        RETURN @valor;  -- retorna sem desconto se parâmetro inválido
+
     RETURN @valor - (@valor * @pct_desconto / 100);
 END;
 ```
 
 ```sql
+-- Usando a função como coluna calculada
 SELECT
     nome,
-    preco                                  AS preco_original,
-    dbo.fn_valor_com_desconto(preco, 10)   AS preco_10pct_off,
-    dbo.fn_valor_com_desconto(preco, 15)   AS preco_15pct_off
+    preco                                   AS preco_original,
+    dbo.fn_valor_com_desconto(preco, 10)    AS preco_10pct_off,
+    dbo.fn_valor_com_desconto(preco, 15)    AS preco_15pct_off,
+    dbo.fn_valor_com_desconto(preco, 20)    AS preco_20pct_off
 FROM produtos
-WHERE preco > 100;
+WHERE preco > 100
+ORDER BY preco DESC;
 ```
 
-**Falar:** "A função encapsula o cálculo. Se a regra de desconto mudar, você muda só aqui — todo SELECT que usa ela já recebe o novo cálculo."
+**Falar:** "Repare no prefixo `dbo.` — obrigatório em SQL Server para funções de usuário. A função aparece no SELECT como se fosse uma coluna nativa. Mude a regra de negócio na função, todos os SELECTs herdam automaticamente."
 
 ---
 
-### 3.4 — Funções de tabela
+### 3.4 — Função de Tabela: VIEW parametrizada
 
-**Falar:** "Função de tabela retorna um conjunto de linhas — é como uma VIEW que aceita parâmetro."
+**Conceito para falar:**
+"Função de tabela retorna um conjunto de linhas — não um único valor. É como uma VIEW que aceita parâmetro. Onde uma VIEW retorna sempre o mesmo conjunto de dados, a função de tabela retorna dados filtrados pelo parâmetro que você passa."
 
 ```sql
+-- Retorna os itens de um pedido específico com detalhes de produto
 CREATE FUNCTION fn_itens_pedido (@id_pedido INT)
 RETURNS TABLE
 AS
 RETURN
 (
     SELECT
-        pr.nome                         AS produto,
-        cat.nome                        AS categoria,
+        pr.nome                                 AS produto,
+        cat.nome                                AS categoria,
         i.quantidade,
         i.preco_unitario,
-        i.quantidade * i.preco_unitario AS subtotal
+        i.quantidade * i.preco_unitario         AS subtotal,
+        -- Percentual que esse item representa no total do pedido
+        ROUND(
+            (i.quantidade * i.preco_unitario) * 100.0
+            / SUM(i.quantidade * i.preco_unitario) OVER (PARTITION BY i.id_pedido),
+        1)                                      AS pct_do_pedido
     FROM itens_pedido AS i
     JOIN produtos     AS pr  ON i.id_produto    = pr.id_produto
     JOIN categorias   AS cat ON pr.id_categoria = cat.id_categoria
@@ -616,164 +1060,234 @@ RETURN
 ```
 
 ```sql
--- Chamar para um pedido específico
+-- Consultar os itens de um pedido específico
 SELECT * FROM dbo.fn_itens_pedido(8);
+SELECT * FROM dbo.fn_itens_pedido(1);
 ```
 
 ```sql
--- Usar com CROSS APPLY — chama a função para cada pedido
+-- CROSS APPLY: chama a função para cada linha da tabela externa
+-- É como um JOIN onde um dos lados é uma função
 SELECT
     p.id_pedido,
-    c.nome     AS cliente,
-    itens.*
+    c.nome      AS cliente,
+    p.data_pedido,
+    itens.produto,
+    itens.categoria,
+    itens.subtotal,
+    itens.pct_do_pedido
 FROM pedidos  AS p
 JOIN clientes AS c ON p.id_cliente = c.id_cliente
 CROSS APPLY dbo.fn_itens_pedido(p.id_pedido) AS itens
-WHERE p.id_pedido IN (1, 7, 8);
+WHERE p.id_pedido IN (1, 7, 8)
+ORDER BY p.id_pedido, itens.subtotal DESC;
 ```
 
-**Falar:** "CROSS APPLY é como um JOIN onde um dos lados é uma função. Para cada pedido, ele chama a função e junta o resultado."
+**Falar:** "CROSS APPLY é uma feature poderosa do T-SQL. Para cada pedido, ele invoca a função e junta o resultado. É o cenário onde você quer o detalhe de cada item mas dentro do contexto de cada pedido."
 
-> **Encerramento da aula 3:**
-> "Resumo: VIEW para padronizar consulta, Procedure para processo/ação, Função para cálculo reutilizável. Na próxima aula a gente vai falar de performance e qualidade — índices e constraints."
-
----
+> **Encerramento da aula 3 — falar:**
+> "Resumo dos objetos: VIEW para padronizar e reutilizar consultas, Procedure para encapsular processos e steps de pipeline, Função para cálculo reutilizável dentro de queries. Na próxima aula a gente fala de performance e qualidade — índices e constraints — os dois pilares que fazem um banco funcionar bem em produção."
 
 ---
 
-# AULA 4 — Index e Constraints
+---
+
+# AULA 4 — Performance e Qualidade: Índices e Constraints
 **⏱️ ~25 min** | Arquivo de referência: [`aula_4/exemplos.sql`](aula_4/exemplos.sql)
 
-> **Falar na abertura:**
-> "Índice garante que a leitura seja rápida. Constraint garante que o dado que entrou é válido. Esses dois juntos são a diferença entre um banco funcional e um banco confiável."
+> **Abertura — falar:**
+> "Duas coisas que diferenciam um banco de produção de um banco de desenvolvimento: performance de leitura e qualidade dos dados. Índice garante que a leitura seja rápida. Constraint garante que o dado que entrou é válido. Esses dois juntos fazem a diferença entre um banco funcional e um banco confiável."
 
 ---
 
-### 4.1 — O que é índice
+### 4.1 — O que é índice e por que importa
 
-**Falar:** "Sem índice, o banco lê todas as linhas para achar o dado — table scan. Com índice, ele vai direto. É como procurar um nome num livro com e sem índice remissivo."
+**Conceito para falar:**
+"Pensa em uma tabela como um livro sem sumário e sem índice remissivo. Para achar uma informação, você lê página por página. No banco, isso se chama *full table scan* ou *table scan* — o banco lê todas as linhas da tabela para encontrar o que você quer."
+
+"Com índice, é como ter o índice remissivo do livro — você vai direto na página certa. Em tabelas grandes, a diferença é de segundos vs milissegundos, ou de minutos vs segundos."
+
+"Todo mundo que cria uma Primary Key automaticamente cria um índice do tipo CLUSTERED — isso é dado pelo banco sem você precisar pedir. Mas outras colunas que você usa em WHERE, JOIN e ORDER BY frequentemente precisam de índices extras."
 
 ```sql
--- Ver os índices existentes em clientes
+-- Ver os índices existentes em uma tabela
 SELECT
-    i.name         AS nome_indice,
-    i.type_desc    AS tipo,
-    i.is_primary_key,
-    STRING_AGG(c.name, ', ') WITHIN GROUP (ORDER BY ic.key_ordinal) AS colunas
+    i.name              AS nome_indice,
+    i.type_desc         AS tipo_indice,
+    i.is_primary_key    AS eh_pk,
+    i.is_unique         AS eh_unico,
+    STRING_AGG(c.name, ', ')
+        WITHIN GROUP (ORDER BY ic.key_ordinal) AS colunas
 FROM sys.indexes       AS i
-JOIN sys.index_columns AS ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-JOIN sys.columns       AS c  ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-WHERE OBJECT_NAME(i.object_id) = 'clientes'
+JOIN sys.index_columns AS ic
+     ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+JOIN sys.columns       AS c
+     ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+WHERE OBJECT_NAME(i.object_id) = 'pedidos'
 GROUP BY i.name, i.type_desc, i.is_primary_key, i.is_unique;
 ```
 
-**Apontar:** "A PRIMARY KEY já criou um índice automaticamente — do tipo CLUSTERED."
+**Apontar:** "A PK já tem índice CLUSTERED automático. As outras colunas — data_pedido, status, id_cliente — ainda não têm. Vamos criar."
 
 ---
 
-### 4.2 — Clustered vs Nonclustered
+### 4.2 — Tipos de índice: Clustered vs Nonclustered
 
-**Falar:** "Clustered organiza os dados físicos da tabela — só pode ter um. Nonclustered é uma estrutura separada que aponta para os dados — pode ter vários."
+**Conceito para falar:**
+"CLUSTERED determina a *ordem física dos dados no disco*. A tabela inteira é organizada pela coluna do índice clustered. Por isso só pode ter UM índice clustered por tabela — você não pode ordenar fisicamente os dados de dois jeitos ao mesmo tempo."
+
+"NONCLUSTERED é uma estrutura separada, uma cópia parcial dos dados que aponta para as linhas originais. Pode ter até 999 por tabela (na prática, muito menos). É o tipo mais comum de índice que você vai criar."
 
 ```sql
--- Clustered = PK da tabela (dados ordenados por id_pedido no disco)
-
--- Criar nonclustered em data_pedido
--- (busca por período é muito comum)
+-- Índice simples em data_pedido — busca por período é muito frequente
 CREATE NONCLUSTERED INDEX idx_pedidos_data
 ON pedidos (data_pedido);
 
--- Índice composto: status + data
--- Útil quando filtra status E período ao mesmo tempo
+-- Índice composto: colunas frequentes juntas em WHERE
+-- A ordem importa: status primeiro porque geralmente é o filtro mais seletivo
+-- Regra: coluna mais seletiva primeiro
 CREATE NONCLUSTERED INDEX idx_pedidos_status_data
 ON pedidos (status, data_pedido);
 
--- Índice com INCLUDE: carrega valor_total no próprio índice
--- Evita ir à tabela pra buscar essa coluna
-CREATE NONCLUSTERED INDEX idx_pedidos_cliente
+-- Índice com INCLUDE: carrega colunas extras no índice sem fazer parte da chave
+-- Evita voltar à tabela para buscar essas colunas (covering index)
+CREATE NONCLUSTERED INDEX idx_pedidos_cliente_cobrindo
 ON pedidos (id_cliente)
 INCLUDE (data_pedido, valor_total, status);
 ```
 
 ```sql
--- Essas queries agora usam os índices criados
+-- Com os índices criados, essas queries são muito mais eficientes
+-- O banco usa o índice em vez de fazer full scan
+
+-- Usa idx_pedidos_data
 SELECT id_pedido, status, valor_total
 FROM pedidos
 WHERE data_pedido BETWEEN '2024-01-01' AND '2024-03-31';
 
+-- Usa idx_pedidos_status_data
 SELECT id_pedido, data_pedido, valor_total
 FROM pedidos
-WHERE id_cliente = 1;
+WHERE status = 'entregue'
+  AND data_pedido >= '2024-01-01';
+
+-- Usa idx_pedidos_cliente_cobrindo — sem precisar ir à tabela principal
+SELECT data_pedido, valor_total, status
+FROM pedidos
+WHERE id_cliente = 3;
 ```
 
----
-
-### 4.3 — Trade-off: leitura vs escrita
-
-**Falar:** "Mais índice não é sempre melhor. Leitura fica mais rápida, mas escrita fica mais lenta — cada INSERT e UPDATE precisa atualizar todos os índices também."
-
-**Falar:** "Regra prática: coluna que aparece muito no WHERE, JOIN ou ORDER BY — cria índice. Tabela de staging que recebe carga em massa — remove os índices antes da carga, recria depois. Uma tabela de staging com 5 índices e 10 milhões de linhas por dia sente muito isso."
+**Falar:** "Para ver o plano de execução e confirmar qual índice o banco está usando: clique em 'Include Actual Execution Plan' ou pressione Ctrl+M antes de executar. O ícone de 'Index Seek' confirma que o índice foi usado — muito mais eficiente que 'Table Scan'."
 
 ---
 
-### 4.4 — Constraints
+### 4.3 — Trade-off: performance de leitura vs escrita
 
-**Falar:** "Constraint é regra de qualidade definida no banco. Não importa se veio de um app, de um pipeline ou de um script manual — o banco valida."
+**Conceito para falar — este é o ponto mais importante de índices em engenharia de dados:**
+"Mais índice não é sempre melhor. Índice melhora leitura (SELECT) mas piora escrita (INSERT, UPDATE, DELETE). Cada vez que você insere uma linha, o banco precisa atualizar todos os índices da tabela. Uma tabela com 10 índices tem 10 estruturas para manter."
+
+"Em engenharia de dados isso é crítico porque você trabalha com dois cenários opostos:"
+- **Tabelas de produção (OLTP):** muitas leituras e escritas — índices nas colunas certas
+- **Tabelas de staging de carga em massa:** você está inserindo milhões de linhas — remova os índices antes, insira tudo, recrie os índices depois
+
+**Regra prática para criar índices:**
+- Coluna aparece com frequência em WHERE, JOIN ou ORDER BY → crie
+- Coluna com alta cardinalidade (muitos valores distintos) → índice mais eficiente
+- Tabela de staging ou temp → sem índice (ou mínimo)
+- Nunca crie índice em toda coluna "por precaução" — meça o impacto primeiro
+
+---
+
+### 4.4 — Constraints: qualidade de dados garantida pelo banco
+
+**Conceito para falar:**
+"Constraint é uma regra de qualidade definida diretamente no banco. Não importa como o dado chegou — via app, via pipeline, via SQL manual — o banco valida antes de aceitar."
+
+"Em pipelines de dados, isso é sua última linha de defesa contra dado ruim. Você pode ter validações no Python, no Airflow, no dbt — mas se uma constraint está no banco, nada passa por ela."
+
+**Tipos de Constraints:**
+- **PRIMARY KEY**: unicidade + NOT NULL
+- **FOREIGN KEY**: integridade referencial entre tabelas
+- **UNIQUE**: unicidade sem ser PK
+- **NOT NULL**: campo obrigatório
+- **CHECK**: regra de domínio customizada (qualquer expressão booleana)
+- **DEFAULT**: valor padrão quando não informado
 
 ```sql
--- Ver as constraints do banco
+-- Ver todas as constraints do banco
 SELECT
-    tc.CONSTRAINT_NAME  AS constraint,
+    tc.CONSTRAINT_NAME  AS nome_constraint,
     tc.CONSTRAINT_TYPE  AS tipo,
     tc.TABLE_NAME       AS tabela,
     kcu.COLUMN_NAME     AS coluna
 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS tc
-JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE  AS kcu
+LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE AS kcu
      ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
     AND tc.TABLE_NAME      = kcu.TABLE_NAME
-ORDER BY tc.TABLE_NAME, tc.CONSTRAINT_TYPE;
-```
+ORDER BY tc.TABLE_NAME, tc.CONSTRAINT_TYPE, tc.CONSTRAINT_NAME;
 
-**Falar:** "Já temos PRIMARY KEY, FOREIGN KEY e UNIQUE criados. Vamos ver as CHECK constraints — regras de domínio em SQL."
-
-```sql
--- Ver as CHECK constraints
-SELECT cc.CONSTRAINT_NAME, cc.TABLE_NAME, cc.CHECK_CLAUSE
+-- Ver especificamente as CHECK constraints e suas regras
+SELECT
+    cc.CONSTRAINT_NAME,
+    tc.TABLE_NAME,
+    cc.CHECK_CLAUSE
 FROM INFORMATION_SCHEMA.CHECK_CONSTRAINTS AS cc
 JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS tc
-     ON cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME;
+     ON cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+ORDER BY tc.TABLE_NAME;
 ```
 
-**Apontar:** `chk_preco_positivo`, `chk_qtd_positiva`, `chk_status`. "Essas regras já estavam no banco.sql."
+**Apontar:** `chk_preco_positivo`, `chk_qtd_positiva`, `chk_status`. "Essas regras estavam no banco.sql desde o início."
 
 ```sql
--- Testar: preço negativo
-INSERT INTO produtos VALUES (99, 'Teste', 1, -50, 0);
+-- Testar CHECK constraint: preço negativo é rejeitado na fonte
+INSERT INTO produtos
+    (id_produto, nome, id_categoria, preco, estoque)
+VALUES
+    (99, 'Produto Inválido', 1, -50.00, 10);
 ```
 
-**Apontar:** Erro de CHECK. "O banco rejeita na fonte."
+**Apontar:** Erro de CHECK. "O banco rejeita na fonte. Não importa se veio de um script Python, de um form web ou de um pipeline Airflow — a regra está no banco."
 
 ```sql
--- Criar nova CHECK constraint
+-- Criando uma CHECK constraint para validar UF
 ALTER TABLE clientes
 ADD CONSTRAINT chk_uf_valido
-CHECK (uf IN ('AC','AL','AP','AM','BA','CE','DF','ES','GO','MA',
-              'MT','MS','MG','PA','PB','PR','PE','PI','RJ','RN',
-              'RS','RO','RR','SC','SP','SE','TO'));
+CHECK (uf IN ('AC','AL','AP','AM','BA','CE','DF','ES','GO',
+              'MA','MT','MS','MG','PA','PB','PR','PE','PI',
+              'RJ','RN','RS','RO','RR','SC','SP','SE','TO'));
 
--- Testar
-INSERT INTO clientes VALUES (20, 'Teste', 'x@x.com', 'XX', 'ZZ', '2024-01-01');
+-- Testar: UF inválida
+INSERT INTO clientes
+    (id_cliente, nome, email, cidade, uf, data_cadastro)
+VALUES
+    (20, 'Teste', 'x@x.com', 'Cidade', 'ZZ', '2024-01-01');
 ```
 
-**Apontar:** Erro. "UF inválida bloqueada pelo banco."
+**Apontar:** Erro de CHECK. "UF 'ZZ' não existe. O banco rejeitou."
 
 ```sql
--- Remove (para manter o banco limpo)
-ALTER TABLE clientes DROP CONSTRAINT chk_uf_valido;
+-- Criando constraint UNIQUE para garantir que email não se repita
+ALTER TABLE clientes
+ADD CONSTRAINT uq_clientes_email UNIQUE (email);
+
+-- Testando
+INSERT INTO clientes
+    (id_cliente, nome, email, cidade, uf, data_cadastro)
+VALUES
+    (20, 'Novo Cliente', 'ana.lima@email.com', 'SP', 'SP', CAST(GETDATE() AS DATE));
 ```
 
-> **Encerramento da aula 4:**
-> "Você agora consegue garantir performance com índice e qualidade com constraint. Na última aula a gente conecta tudo isso ao mundo do Data Warehouse."
+**Apontar:** Erro de UNIQUE se o email já existir. "Garantia de unicidade sem ser PK."
+
+```sql
+-- Limpeza das constraints de demo
+ALTER TABLE clientes DROP CONSTRAINT chk_uf_valido;
+ALTER TABLE clientes DROP CONSTRAINT uq_clientes_email;
+```
+
+> **Encerramento da aula 4 — falar:**
+> "Com índice você garante performance. Com constraint você garante qualidade. Juntos, eles fazem a diferença entre um banco que funciona e um banco confiável para produção. Na última aula, a gente conecta tudo isso ao mundo do Data Warehouse — onde todo esse SQL vai ser a ferramenta de movimentação de dados."
 
 ---
 
@@ -782,71 +1296,114 @@ ALTER TABLE clientes DROP CONSTRAINT chk_uf_valido;
 # AULA 5 — SQL no Data Warehouse
 **⏱️ ~30 min** | Arquivo de referência: [`aula_5/exemplos.sql`](aula_5/exemplos.sql)
 
-> **Falar na abertura:**
-> "Tudo que você aprendeu nas 4 aulas anteriores — JOIN, CTE, window function, constraints, índice — vira ferramenta aqui. O DW não é uma tecnologia nova. É um padrão. E SQL é a linguagem que move dados dentro dele."
+> **Abertura — falar:**
+> "Tudo que você aprendeu nas 4 aulas anteriores — JOIN, CTE, window function, constraints, índice — vira ferramenta aqui. O Data Warehouse não é uma tecnologia nova e misteriosa. É um padrão arquitetural. E SQL é a linguagem que move dados dentro dele. Nessa aula você vai ver um pipeline completo de DW rodando."
 
 ---
 
-### 5.1 — OLTP vs OLAP
+### 5.1 — OLTP vs OLAP: dois mundos diferentes
 
-**Falar:** "OLTP é o banco operacional — muitas transações pequenas e rápidas. OLAP é o banco analítico — poucas queries grandes sobre muitos dados. No OLTP você normaliza pra evitar redundância. No OLAP você desnormaliza pra ter performance analítica."
+**Conceito para falar:**
+"Todo dado começa num sistema transacional — OLTP. O sistema de e-commerce, o ERP, o CRM. Esses sistemas são otimizados para transações rápidas: INSERT de um pedido, UPDATE de um status, SELECT de um cliente. Alta frequência de operações pequenas."
+
+"O problema é que perguntas analíticas em OLTP são pesadas: 'qual categoria vendeu mais nos últimos 6 meses por região?' exige JOINs em 4 tabelas, varrer milhões de linhas. Isso compete com as transações do dia a dia e deixa o sistema lento."
+
+"O OLAP — Data Warehouse — resolve isso. Os dados são transformados e carregados em um modelo específico para análise: *desnormalizado*, otimizado para leitura, com histórico completo. No OLTP você normaliza para evitar redundância. No OLAP você desnormaliza para ter performance analítica."
 
 ```sql
 USE loja_db;
 
--- No OLTP: essa query simples precisa de 4 JOINs
+-- No OLTP: para responder uma pergunta analítica simples, você precisa de 4 JOINs
+-- Isso em uma tabela com 1 bilhão de itens_pedido seria muito pesado
 SELECT
-    cat.nome                                    AS categoria,
-    SUM(i.quantidade * i.preco_unitario)        AS receita_janeiro
+    cat.nome                                        AS categoria,
+    SUM(i.quantidade * i.preco_unitario)            AS receita_total
 FROM itens_pedido AS i
 JOIN pedidos      AS p   ON i.id_pedido     = p.id_pedido
 JOIN produtos     AS pr  ON i.id_produto    = pr.id_produto
 JOIN categorias   AS cat ON pr.id_categoria = cat.id_categoria
 WHERE p.data_pedido BETWEEN '2024-01-01' AND '2024-01-31'
   AND p.status = 'entregue'
-GROUP BY cat.nome;
+GROUP BY cat.nome
+ORDER BY receita_total DESC;
 ```
 
-**Falar:** "Guarda esse resultado. A gente vai fazer a mesma pergunta no DW no final da aula — muito mais simples."
+**Falar:** "Guarda bem esse resultado — categoria e receita. Vamos fazer a mesma pergunta no DW mais adiante. Compare a quantidade de JOINs e a complexidade."
 
 ---
 
-### 5.2 — Star Schema: fato e dimensão
+### 5.2 — Star Schema: o modelo do Data Warehouse
 
-**Falar:** "No DW, você tem dois tipos de tabela. Dimensão = contexto: quem, o quê, quando, onde. Fato = o que aconteceu em números. O modelo estrela conecta as dimensões à fato."
+**Conceito para falar:**
+"No DW, você tem dois tipos de tabela fundamentais:"
+- **Dimensão (dim_)**: o *contexto* — quem comprou, o quê foi comprado, quando, onde. São os atributos descritivos. Mudam pouco, têm histórico.
+- **Fato (fato_)**: o *que aconteceu*, em números. Cada linha é um evento mensurável — uma venda, um clique, uma transação. Têm FK para as dimensões e as métricas numéricas.
+
+"O modelo estrela (Star Schema) conecta a tabela fato ao centro, e as dimensões nas pontas — daí o nome estrela."
+
+"Um detalhe crítico: a fato usa *surrogate keys* (sk_) — chaves geradas pelo próprio DW, não as do OLTP. Isso permite guardar histórico de mudanças, independe do sistema de origem e facilita integração de múltiplas fontes."
 
 ```sql
 USE dw_loja;
 
--- Ver a estrutura das dimensões
-SELECT COLUMN_NAME, DATA_TYPE
+-- Estrutura da dimensão de cliente
+SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
 FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_NAME = 'dim_cliente';
+WHERE TABLE_NAME = 'dim_cliente'
+ORDER BY ORDINAL_POSITION;
 
-SELECT COLUMN_NAME, DATA_TYPE
+-- Estrutura da tabela fato
+SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
 FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_NAME = 'fato_vendas';
+WHERE TABLE_NAME = 'fato_vendas'
+ORDER BY ORDINAL_POSITION;
 ```
 
-**Falar:** "Repara no sk_cliente em fato_vendas — é a surrogate key. Não é o id_cliente do OLTP. O DW gera a própria chave, independente do sistema de origem. Isso permite guardar histórico de mudanças — que a gente vai ver no SCD."
+**Apontar:**
+- `sk_cliente` em `fato_vendas` — a surrogate key gerada pelo DW, não o `id_cliente` do OLTP
+- `data_inicio`, `data_fim`, `ativo` em `dim_cliente` — campos que vão suportar histórico de mudanças (SCD Tipo 2, que veremos mais adiante)
 
 ---
 
-### 5.3 — Carga: staging → dimensões
+### 5.3 — Arquitetura de carga: Staging → Dimensões → Fato
 
-**Falar:** "O fluxo de carga tem três etapas: extrai do OLTP pra staging, da staging pra dimensões, das dimensões pra fato. Vamos executar cada passo."
+**Conceito para falar:**
+"O fluxo de carga do DW segue sempre essa sequência:"
+
+```
+OLTP → Staging → Dimensões → Fato
+```
+
+"**Staging**: extrai os dados do OLTP como vieram, sem transformação. É a 'zona de pouso' — você isola o DW do sistema operacional e tem um snapshot dos dados para processar."
+
+"**Dimensões**: carrega primeiro porque a fato precisa das surrogate keys das dimensões. Só clientes novos e produtos novos são inseridos (carga incremental)."
+
+"**Fato**: carrega por último, resolvendo as surrogate keys das dimensões e os dados da staging."
 
 ```sql
--- Passo 1: extrai do OLTP para staging
+USE dw_loja;
+
+-- PASSO 1: Staging — extrai do OLTP e pousa na zona de staging
+-- TRUNCATE antes para reprocessar do zero (ou use incremental com delta de data)
 TRUNCATE TABLE stg_pedidos;
 
-INSERT INTO stg_pedidos (id_pedido, id_cliente, nome_cliente, cidade, uf,
-                          id_produto, nome_produto, categoria, preco_produto,
-                          data_pedido, quantidade, valor)
+INSERT INTO stg_pedidos (
+    id_pedido, id_cliente, nome_cliente, cidade, uf,
+    id_produto, nome_produto, categoria, preco_produto,
+    data_pedido, quantidade, valor
+)
 SELECT
-    p.id_pedido, c.id_cliente, c.nome, c.cidade, c.uf,
-    pr.id_produto, pr.nome, cat.nome, pr.preco,
-    p.data_pedido, i.quantidade,
+    p.id_pedido,
+    c.id_cliente,
+    c.nome,
+    c.cidade,
+    c.uf,
+    pr.id_produto,
+    pr.nome,
+    cat.nome,
+    pr.preco,
+    p.data_pedido,
+    i.quantidade,
     i.quantidade * i.preco_unitario
 FROM loja_db.dbo.itens_pedido AS i
 JOIN loja_db.dbo.pedidos      AS p   ON i.id_pedido     = p.id_pedido
@@ -859,95 +1416,141 @@ SELECT COUNT(*) AS linhas_na_staging FROM stg_pedidos;
 ```
 
 ```sql
--- Passo 2: da staging para dim_cliente (só clientes novos)
+-- PASSO 2: Carrega dim_cliente — só clientes novos (carga incremental)
+-- WHERE NOT EXISTS evita duplicação
 INSERT INTO dim_cliente (id_cliente_origem, nome, cidade, uf, data_inicio, ativo)
-SELECT DISTINCT s.id_cliente, s.nome_cliente, s.cidade, s.uf,
-                CAST(GETDATE() AS DATE), 1
+SELECT DISTINCT
+    s.id_cliente,
+    s.nome_cliente,
+    s.cidade,
+    s.uf,
+    CAST(GETDATE() AS DATE),
+    1
 FROM stg_pedidos AS s
 WHERE NOT EXISTS (
-    SELECT 1 FROM dim_cliente AS d
-    WHERE d.id_cliente_origem = s.id_cliente AND d.ativo = 1
+    SELECT 1
+    FROM dim_cliente AS d
+    WHERE d.id_cliente_origem = s.id_cliente
+      AND d.ativo = 1
 );
 
--- Passo 3: idem para dim_produto
+-- PASSO 3: Idem para dim_produto
 INSERT INTO dim_produto (id_produto_origem, nome, categoria, preco, data_inicio, ativo)
-SELECT DISTINCT s.id_produto, s.nome_produto, s.categoria, s.preco_produto,
-                CAST(GETDATE() AS DATE), 1
+SELECT DISTINCT
+    s.id_produto,
+    s.nome_produto,
+    s.categoria,
+    s.preco_produto,
+    CAST(GETDATE() AS DATE),
+    1
 FROM stg_pedidos AS s
 WHERE NOT EXISTS (
-    SELECT 1 FROM dim_produto AS d
-    WHERE d.id_produto_origem = s.id_produto AND d.ativo = 1
+    SELECT 1
+    FROM dim_produto AS d
+    WHERE d.id_produto_origem = s.id_produto
+      AND d.ativo = 1
 );
 
-SELECT COUNT(*) AS clientes FROM dim_cliente;
-SELECT COUNT(*) AS produtos FROM dim_produto;
+SELECT COUNT(*) AS clientes_na_dim FROM dim_cliente;
+SELECT COUNT(*) AS produtos_na_dim FROM dim_produto;
 ```
 
-**Falar:** "O WHERE NOT EXISTS é a lógica de carga incremental — só insere quem ainda não está. Execute duas vezes — na segunda vai retornar 0 inseridos."
+**Falar:** "Execute os dois INSERTs de dimensão uma segunda vez — vai retornar 0 linhas inseridas. O `WHERE NOT EXISTS` é o mecanismo de idempotência: você pode rodar quantas vezes quiser, o resultado é o mesmo. Isso é fundamental em pipelines de dados — a carga deve ser segura para re-execução."
 
 ---
 
-### 5.4 — Carregando a fato e comparando com OLTP
+### 5.4 — Carregando a Fato e validando com OLTP
 
 ```sql
--- Carrega fato_vendas referenciando as surrogate keys
+-- PASSO 4: Carrega fato_vendas resolvendo as surrogate keys
 INSERT INTO fato_vendas (sk_cliente, sk_produto, sk_tempo, id_pedido_origem, quantidade, valor)
 SELECT
-    dc.sk_cliente, dp.sk_produto, dt.sk_tempo,
-    s.id_pedido, s.quantidade, s.valor
+    dc.sk_cliente,
+    dp.sk_produto,
+    dt.sk_tempo,
+    s.id_pedido,
+    s.quantidade,
+    s.valor
 FROM stg_pedidos AS s
+-- Resolve SK de cliente pelo id de origem + ativo=1
 JOIN dim_cliente AS dc ON s.id_cliente = dc.id_cliente_origem AND dc.ativo = 1
+-- Resolve SK de produto pelo id de origem + ativo=1
 JOIN dim_produto AS dp ON s.id_produto = dp.id_produto_origem AND dp.ativo = 1
+-- Resolve SK de tempo (chave inteira no formato yyyymmdd)
 JOIN dim_tempo   AS dt ON CAST(FORMAT(s.data_pedido, 'yyyyMMdd') AS INT) = dt.sk_tempo
+-- Idempotência: não duplica se já foi carregado
 WHERE NOT EXISTS (
-    SELECT 1 FROM fato_vendas AS f
-    WHERE f.id_pedido_origem = s.id_pedido AND f.sk_produto = dp.sk_produto
+    SELECT 1
+    FROM fato_vendas AS f
+    WHERE f.id_pedido_origem = s.id_pedido
+      AND f.sk_produto       = dp.sk_produto
 );
 
 SELECT COUNT(*) AS linhas_na_fato FROM fato_vendas;
 ```
 
 ```sql
--- A mesma pergunta do início — agora no DW
+-- VALIDAÇÃO: mesma pergunta do OLTP — agora no DW
+-- Compare a simplicidade com os 4 JOINs do OLTP
+USE dw_loja;
+
 SELECT
     dp.categoria,
-    SUM(f.valor) AS receita_total
+    SUM(f.valor)        AS receita_total,
+    COUNT(f.sk_cliente) AS qtd_vendas
 FROM fato_vendas AS f
 JOIN dim_produto AS dp ON f.sk_produto = dp.sk_produto
 JOIN dim_tempo   AS dt ON f.sk_tempo   = dt.sk_tempo
-WHERE dt.mes = 1 AND dt.ano = 2024
+WHERE dt.mes = 1
+  AND dt.ano = 2024
 GROUP BY dp.categoria
 ORDER BY receita_total DESC;
 ```
 
-**Falar:** "Mesmo resultado. Mas agora: sem JOIN em pedidos, sem JOIN em clientes, sem JOIN em itens_pedido e categorias. No OLTP eram 4 JOINs. No DW são 2. Em bilhões de linhas, essa diferença é enorme."
+**Falar:** "Mesmo resultado que o OLTP. Mas agora: sem JOIN em pedidos, sem JOIN em clientes, sem JOIN em itens_pedido, sem JOIN em categorias. No OLTP eram 4 JOINs em 5 tabelas. No DW são 2 JOINs. Com bilhões de linhas, em petabytes de dados, essa diferença determina se a query demora 2 segundos ou 20 minutos."
 
 ---
 
-### 5.5 — MERGE (upsert)
+### 5.5 — MERGE: upsert em uma instrução
 
-**Falar:** "MERGE resolve em uma instrução o que normalmente precisaria de dois passos: inserir quem é novo, atualizar quem mudou."
+**Conceito para falar:**
+"MERGE resolve em uma única instrução o que normalmente exigiria dois passos: inserir linhas novas e atualizar linhas que mudaram. É o operador de 'upsert' do SQL. Muito usado em carga incremental de dimensões e fatos."
 
 ```sql
--- Staging com dados atualizados
+-- Simulando um delta de clientes: mudanças + novo
 CREATE TABLE #stg_clientes_delta (
-    id_cliente INT, nome VARCHAR(100), cidade VARCHAR(50), uf CHAR(2)
+    id_cliente  INT,
+    nome        VARCHAR(100),
+    cidade      VARCHAR(50),
+    uf          CHAR(2)
 );
 
 INSERT INTO #stg_clientes_delta VALUES
-(1,  'Ana Lima',     'Campinas',       'SP'),  -- mudou de cidade
+(1,  'Ana Lima',     'Campinas',       'SP'),  -- mudou de cidade (era São Paulo)
 (2,  'Bruno Santos', 'Rio de Janeiro', 'RJ'),  -- sem mudança
 (11, 'Karen Dias',   'Belém',          'PA');  -- cliente novo no DW
 ```
 
 ```sql
+-- MERGE: um único comando faz insert e update
 MERGE dim_cliente AS destino
-USING (SELECT id_cliente, nome, cidade, uf FROM #stg_clientes_delta) AS origem
-ON destino.id_cliente_origem = origem.id_cliente AND destino.ativo = 1
+USING (
+    SELECT id_cliente, nome, cidade, uf
+    FROM #stg_clientes_delta
+) AS origem
+ON destino.id_cliente_origem = origem.id_cliente
+AND destino.ativo = 1
 
-WHEN MATCHED AND (destino.cidade <> origem.cidade OR destino.uf <> origem.uf) THEN
-    UPDATE SET destino.cidade = origem.cidade, destino.uf = origem.uf
+-- Quando existe nos dois lados E houve mudança: atualiza
+WHEN MATCHED AND (
+    destino.cidade <> origem.cidade OR
+    destino.uf     <> origem.uf
+) THEN
+    UPDATE SET
+        destino.cidade = origem.cidade,
+        destino.uf     = origem.uf
 
+-- Quando existe só na origem (novo): insere
 WHEN NOT MATCHED BY TARGET THEN
     INSERT (id_cliente_origem, nome, cidade, uf, data_inicio, ativo)
     VALUES (origem.id_cliente, origem.nome, origem.cidade, origem.uf,
@@ -955,58 +1558,102 @@ WHEN NOT MATCHED BY TARGET THEN
 
 DROP TABLE #stg_clientes_delta;
 
-SELECT sk_cliente, id_cliente_origem, nome, cidade, uf FROM dim_cliente ORDER BY id_cliente_origem;
+-- Resultado: Ana mudou, Bruno igual, Karen foi inserida
+SELECT sk_cliente, id_cliente_origem, nome, cidade, uf, ativo
+FROM dim_cliente
+ORDER BY id_cliente_origem;
 ```
 
-**Apontar:** Ana agora está em Campinas. Karen foi inserida. Bruno não mudou.
+**Apontar:** "Ana agora está em Campinas. Karen foi inserida com nova sk. Bruno permaneceu igual — o MERGE não tocou porque não houve mudança."
 
 ---
 
-### 5.6 — SCD Tipo 1 e Tipo 2
+### 5.6 — SCD Tipo 1 e Tipo 2: tratando mudanças em dimensões
 
-**Falar:** "SCD — Slowly Changing Dimension — define como você trata mudanças nos dados dimensionais. Tipo 1: sobrescreve, sem histórico. Tipo 2: preserva o histórico criando nova linha."
+**Conceito para falar:**
+"SCD — Slowly Changing Dimension — é um dos padrões mais importantes de Data Warehouse. Define como você trata o fato de que dimensões mudam com o tempo."
+
+"Exemplo clássico: uma cliente mora em São Paulo. Ela compra um notebook. Depois ela se muda para o Rio de Janeiro. Ela compra mais um produto. Quando você analisa vendas por cidade, o notebook foi vendido para uma cliente de SP ou RJ?"
+
+"A resposta depende do tipo de SCD que você implementou."
+
+**SCD Tipo 1 — Sobrescreve, sem histórico:**
+- Quando usar: dados que simplesmente corrigem um erro, ou atributos que não têm valor histórico (nome corrigido, email corrigido)
+- Risco: você perde o histórico — não sabe o que era antes
 
 ```sql
--- SCD Tipo 1: corrige sem guardar o que era antes
--- Quando usar: correção de erro, campo sem valor histórico
+-- SCD Tipo 1: sobrescreve o valor diretamente
+-- Caso de uso: correção de nome digitado errado
 UPDATE dim_cliente
-SET nome = 'Ana Lima Silva'
-WHERE id_cliente_origem = 1 AND ativo = 1;
+SET nome = 'Ana Lima Silva'         -- versão corrigida
+WHERE id_cliente_origem = 1
+  AND ativo = 1;
 
--- Desfaz
+-- Desfaz para o exemplo
 UPDATE dim_cliente
 SET nome = 'Ana Lima'
-WHERE id_cliente_origem = 1 AND ativo = 1;
+WHERE id_cliente_origem = 1
+  AND ativo = 1;
 ```
 
-**Falar:** "Agora SCD Tipo 2 — imagine que Ana mudou de cidade. Não queremos perder a informação de que ela era de SP quando comprou o Notebook."
+**SCD Tipo 2 — Preserva histórico com nova linha:**
+- Quando usar: atributos com valor histórico (cidade, cargo, segmento)
+- Mecanismo: fecha o registro atual (seta data_fim e ativo=0), insere novo registro com nova SK
 
 ```sql
--- Passo 1: fecha o registro atual
+-- SCD Tipo 2: Ana mudou de SP para RJ
+
+-- PASSO 1: fecha o registro atual
 UPDATE dim_cliente
 SET data_fim = DATEADD(DAY, -1, CAST(GETDATE() AS DATE)),
     ativo    = 0
-WHERE id_cliente_origem = 1 AND ativo = 1;
+WHERE id_cliente_origem = 1
+  AND ativo = 1;
 
--- Passo 2: insere nova versão
-INSERT INTO dim_cliente (id_cliente_origem, nome, cidade, uf, data_inicio, ativo)
-VALUES (1, 'Ana Lima', 'Rio de Janeiro', 'RJ', CAST(GETDATE() AS DATE), 1);
+-- PASSO 2: insere nova versão com os novos dados
+INSERT INTO dim_cliente (id_cliente_origem, nome, cidade, uf, data_inicio, data_fim, ativo)
+VALUES (1, 'Ana Lima', 'Rio de Janeiro', 'RJ', CAST(GETDATE() AS DATE), NULL, 1);
 
--- Resultado: duas versões de Ana
-SELECT sk_cliente, nome, cidade, uf, data_inicio, data_fim, ativo
+-- Resultado: duas versões de Ana com SKs diferentes
+SELECT
+    sk_cliente,
+    nome,
+    cidade,
+    uf,
+    data_inicio,
+    data_fim,
+    ativo
 FROM dim_cliente
 WHERE id_cliente_origem = 1
 ORDER BY data_inicio;
 ```
 
-**Falar:** "Duas linhas — duas surrogate keys diferentes. As vendas antigas continuam apontando para a sk antiga, que diz que Ana era de SP. As novas apontam para a nova sk, que diz Rio de Janeiro. Histórico preservado automaticamente."
+**Falar devagar:** "Duas linhas — duas surrogate keys. Quando o notebook foi comprado, a fato_vendas apontou para a sk antiga — que diz SP. Quando o próximo produto foi comprado, vai apontar para a nova sk — que diz RJ. O histórico está preservado automaticamente, sem nenhuma alteração na fato. É por isso que a fato usa surrogate key, não o ID do OLTP."
 
-**Falar:** "Esse é o valor do DW. Não é só guardar dado — é guardar o estado do dado no momento em que o fato aconteceu."
+```sql
+-- Consulta histórica: vendas por cidade levando em conta SCD Tipo 2
+-- Cada venda reflete a cidade do cliente NO MOMENTO da compra
+SELECT
+    f.id_pedido_origem,
+    dc.nome        AS cliente,
+    dc.cidade      AS cidade_na_epoca_da_compra,
+    dt.data_completa,
+    f.valor
+FROM fato_vendas AS f
+JOIN dim_cliente AS dc ON f.sk_cliente = dc.sk_cliente   -- usa SK, não id_origem
+JOIN dim_tempo   AS dt ON f.sk_tempo   = dt.sk_tempo
+WHERE dc.id_cliente_origem = 1
+ORDER BY dt.data_completa;
+```
 
-> **Encerramento final:**
-> "Em 5 aulas você foi de 'o que é uma tabela' até SCD Tipo 2 e pipeline de DW. Tudo com SQL. Isso é o que você vai usar no dia a dia como engenheiro de dados."
+**Falar:** "Esse é o poder do SCD Tipo 2. Não é só guardar dado — é guardar o *estado* do dado no momento em que o fato aconteceu. Em análise de comportamento de cliente, em auditoria, em cálculo de receita por região, esse histórico é fundamental."
+
+> **Encerramento final — falar:**
+> "Em 5 aulas você foi de 'o que é uma tabela' até SCD Tipo 2, pipeline de DW e window functions. Tudo com SQL. Isso é o que você usa no dia a dia como engenheiro de dados — seja em SQL Server, BigQuery, Snowflake, Databricks."
 >
-> "Os exercícios têm três níveis na pasta `/exercicios` — básico, intermediário e avançado, todos com gabarito. Se esse conteúdo foi útil, compartilha com quem tá começando na área."
+> "O que muda entre as plataformas é a sintaxe de alguns detalhes. O que não muda é o modelo mental: como os dados se relacionam, como você os transforma, como você garante qualidade e performance, como você projeta um Data Warehouse."
+>
+> "Os exercícios têm três níveis na pasta `/exercicios` — básico, intermediário e avançado, todos com gabarito. Se esse conteúdo foi útil, compartilha com quem está começando na área."
 
 ---
 
@@ -1014,14 +1661,38 @@ ORDER BY data_inicio;
 
 ## 📁 Referências Rápidas
 
-| Arquivo | Uso |
-|---------|-----|
-| [`banco.sql`](banco.sql) | Rodar antes de tudo |
-| [`aula_1/exemplos.sql`](aula_1/exemplos.sql) | Código completo da aula 1 |
-| [`aula_2/exemplos.sql`](aula_2/exemplos.sql) | Código completo da aula 2 |
-| [`aula_3/exemplos.sql`](aula_3/exemplos.sql) | Código completo da aula 3 |
-| [`aula_4/exemplos.sql`](aula_4/exemplos.sql) | Código completo da aula 4 |
-| [`aula_5/exemplos.sql`](aula_5/exemplos.sql) | Código completo da aula 5 |
-| [`exercicios/basico.sql`](exercicios/basico.sql) | 8 exercícios nível básico |
-| [`exercicios/intermediario.sql`](exercicios/intermediario.sql) | 6 exercícios nível intermediário |
-| [`exercicios/avancado.sql`](exercicios/avancado.sql) | 4 exercícios nível avançado |
+### Guias por aula (use um por vez durante a gravação)
+
+| Guia | Conteúdo |
+|------|----------|
+| [`aula_1/readme_guia.md`](aula_1/readme_guia.md) | Guia completo da Aula 1 — PK, FK, relacionamentos, ACID, CRUD |
+| [`aula_2/readme_guia.md`](aula_2/readme_guia.md) | Guia completo da Aula 2 — SELECT, JOIN, GROUP BY, CTE, Window Functions |
+| [`aula_3/readme_guia.md`](aula_3/readme_guia.md) | Guia completo da Aula 3 — VIEW, Procedure, Funções |
+| [`aula_4/readme_guia.md`](aula_4/readme_guia.md) | Guia completo da Aula 4 — Índices e Constraints |
+| [`aula_5/readme_guia.md`](aula_5/readme_guia.md) | Guia completo da Aula 5 — Data Warehouse, MERGE, SCD |
+
+### Arquivos de código e exercícios
+
+| Arquivo | O que faz |
+|---------|-----------|
+| [`banco.sql`](banco.sql) | Cria `loja_db` e `dw_loja` com todos os dados. Rode isso antes de tudo. |
+| [`aula_1/exemplos.sql`](aula_1/exemplos.sql) | Código completo: fundamentos relacionais, PK, FK, ACID, CRUD |
+| [`aula_2/exemplos.sql`](aula_2/exemplos.sql) | Código completo: SELECT, WHERE, CASE, JOIN, GROUP BY, CTE, Window Functions |
+| [`aula_3/exemplos.sql`](aula_3/exemplos.sql) | Código completo: VIEW, Stored Procedure, Função escalar, Função de tabela |
+| [`aula_4/exemplos.sql`](aula_4/exemplos.sql) | Código completo: Clustered/Nonclustered index, Constraints (PK, FK, CHECK, UNIQUE) |
+| [`aula_5/exemplos.sql`](aula_5/exemplos.sql) | Código completo: OLTP vs OLAP, Star Schema, carga Staging→Dim→Fato, MERGE, SCD 1/2 |
+| [`exercicios/basico.sql`](exercicios/basico.sql) | 8 exercícios nível básico com gabarito |
+| [`exercicios/intermediario.sql`](exercicios/intermediario.sql) | 6 exercícios nível intermediário com gabarito |
+| [`exercicios/avancado.sql`](exercicios/avancado.sql) | 4 exercícios nível avançado com gabarito |
+
+---
+
+## 🧭 Conceitos-Chave por Aula (Revisão Rápida)
+
+| Aula | Conceitos Centrais | O que o aluno leva |
+|------|--------------------|--------------------|
+| 1 | PK, FK, 1:N, N:N, ACID, CRUD | Como o banco garante integridade e consistência |
+| 2 | SELECT, JOIN, GROUP BY, HAVING, CTE, Window Functions | SQL como motor de transformação |
+| 3 | VIEW, Procedure, Função Escalar, Função de Tabela | Como organizar lógica dentro do banco |
+| 4 | Clustered/Nonclustered index, CHECK, UNIQUE, NOT NULL | Como garantir performance e qualidade |
+| 5 | OLTP vs OLAP, Star Schema, Staging, MERGE, SCD 1/2 | Como construir e carregar um Data Warehouse |
